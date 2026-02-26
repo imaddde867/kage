@@ -1,0 +1,20 @@
+# LLM
+ollama
+
+# Speech to text (local Whisper — runs on CPU, no GPU needed)
+faster-whisper
+
+# Audio recording + playback
+sounddevice
+numpy
+soundfile
+
+# Wake word detection
+openwakeword
+
+# TTS (neural, local, CPU-only, ~25MB model)
+kittentts
+
+# Utilities
+python-dotenv
+requests
