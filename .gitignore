@@ -1,0 +1,10 @@
+data/memory/*.sqlite3
+data/memory/chroma.sqlite3
+data/memory/index/
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+dist/
+build/
+.DS_Store
