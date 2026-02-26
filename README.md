@@ -13,7 +13,7 @@ Long term, Kage is a second brain: part coach, part best friend, part technical 
 This repository is an early local runtime for Kage on macOS:
 
 - Voice loop: wake word -> speech-to-text -> LLM -> text-to-speech
-- Local memory stored in SQLite (`data/memory/jarvis_memory.db`)
+- Local memory stored in SQLite (`data/memory/kage_memory.db`)
 - Live context injection from Apple Calendar, Reminders, and Notes
 - Ollama-backed local LLM responses
 - Persistent memory recall across sessions (keyword-based for now)
@@ -93,14 +93,14 @@ python main.py
 
 ## Usage
 
-Say **"Hey Jarvis"** -> Kage responds -> speak naturally -> Kage replies aloud.
+Say your configured wake word (default: **"Hey Jarvis"**) -> Kage responds -> speak naturally -> Kage replies aloud.
 
 Kage pulls live context from Apple apps and combines it with local memory before sending your prompt to the local LLM.
 
 ## Project Structure
 
 ```text
-jarvis/
+kage/
 ├── main.py                 # Runtime orchestration loop
 ├── config.py               # Typed settings + env loading
 ├── core/

@@ -79,11 +79,10 @@ def get_settings() -> Settings:
         wake_word_threshold=_env_float("WAKE_WORD_THRESHOLD", 0.5),
         whisper_model=_env_str("WHISPER_MODEL", "base"),
         tts_voice=_env_str("TTS_VOICE", "Jasper"),
-        kittentts_model=_env_str("KITTENTTS_MODEL", "KittenML/kitten-tts-mini-0.8"),
+        kittentts_model=_env_str("KITTENTTS_MODEL", ""),
         kittentts_sample_rate=_env_int("KITTENTTS_SAMPLE_RATE", 24000),
         say_fallback_voice=_env_str("SAY_FALLBACK_VOICE", "Daniel"),
-        # Preserve env var name for backwards compatibility; expose better alias.
-        memory_dir=_env_str("CHROMA_PERSIST_DIR", "./data/memory"),
+        memory_dir=_env_str("MEMORY_DIR", "./data/memory"),
         user_name=_env_str("USER_NAME", "Imad"),
         sample_rate=_env_int("SAMPLE_RATE", 16000),
         wake_word_chunk_size=_env_int("WAKE_WORD_CHUNK_SIZE", 1280),
@@ -92,33 +91,3 @@ def get_settings() -> Settings:
         silence_duration=_env_float("SILENCE_DURATION", 1.5),
         max_record_seconds=_env_int("MAX_RECORD_SECONDS", 30),
     )
-
-
-_SETTINGS = get_settings()
-
-# Module-level compatibility aliases (legacy imports depend on these names)
-OLLAMA_BASE_URL = _SETTINGS.ollama_base_url
-OLLAMA_MODEL = _SETTINGS.ollama_model
-OLLAMA_TIMEOUT_SECONDS = _SETTINGS.ollama_timeout_seconds
-
-WAKE_WORD = _SETTINGS.wake_word
-WAKE_WORD_MODEL = _SETTINGS.wake_word_model
-WAKE_WORD_THRESHOLD = _SETTINGS.wake_word_threshold
-WHISPER_MODEL = _SETTINGS.whisper_model
-
-TTS_VOICE = _SETTINGS.tts_voice
-KITTENTTS_MODEL = _SETTINGS.kittentts_model
-KITTENTTS_SAMPLE_RATE = _SETTINGS.kittentts_sample_rate
-SAY_FALLBACK_VOICE = _SETTINGS.say_fallback_voice
-
-MEMORY_DIR = _SETTINGS.memory_dir
-CHROMA_PERSIST_DIR = _SETTINGS.memory_dir
-
-USER_NAME = _SETTINGS.user_name
-
-SAMPLE_RATE = _SETTINGS.sample_rate
-WAKE_WORD_CHUNK_SIZE = _SETTINGS.wake_word_chunk_size
-RECORD_CHUNK_SIZE = _SETTINGS.record_chunk_size
-SILENCE_THRESHOLD = _SETTINGS.silence_threshold
-SILENCE_DURATION = _SETTINGS.silence_duration
-MAX_RECORD_SECONDS = _SETTINGS.max_record_seconds

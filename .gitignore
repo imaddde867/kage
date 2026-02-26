@@ -1,4 +1,5 @@
 data/memory/*.sqlite3
+data/memory/*.db
 data/memory/chroma.sqlite3
 data/memory/index/
 __pycache__/

@@ -9,13 +9,19 @@ from typing import Iterable
 
 import config
 
+_DEFAULT_DB_FILENAME = "kage_memory.db"
+_CONVERSATION_SCAN_LIMIT = 100
+_FACT_SCAN_LIMIT = 200
+_FACT_OUTPUT_LIMIT = 3
+
 
 @dataclass
 class MemoryStore:
     db_path: Path | None = None
 
     def __post_init__(self) -> None:
-        base_path = Path(self.db_path) if self.db_path is not None else Path(config.MEMORY_DIR) / "jarvis_memory.db"
+        default_path = Path(config.get_settings().memory_dir) / _DEFAULT_DB_FILENAME
+        base_path = Path(self.db_path) if self.db_path is not None else default_path
         self.db_path = base_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
@@ -87,8 +93,9 @@ class MemoryStore:
                 SELECT user_input, jarvis_response
                 FROM conversations
                 ORDER BY timestamp DESC
-                LIMIT 100
-                """
+                LIMIT ?
+                """,
+                (_CONVERSATION_SCAN_LIMIT,),
             ).fetchall()
 
             matches: list[tuple[int, str, str]] = []
@@ -101,14 +108,22 @@ class MemoryStore:
                 if score > 0:
                     matches.append((score, user_text, reply_text))
 
-            matches.sort(reverse=True)
+            matches.sort(key=lambda item: item[0], reverse=True)
             top_matches = matches[: max(n_results, 0)]
             if top_matches:
                 parts.append("--- Relevant past exchanges ---")
                 for _, user_text, reply_text in top_matches:
-                    parts.append(f"User: {user_text}\nJarvis: {reply_text}")
+                    parts.append(f"User: {user_text}\nKage: {reply_text}")
 
-            fact_rows = conn.execute("SELECT fact, category FROM facts").fetchall()
+            fact_rows = conn.execute(
+                """
+                SELECT fact, category
+                FROM facts
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (_FACT_SCAN_LIMIT,),
+            ).fetchall()
             fact_matches: list[tuple[int, str]] = []
             for fact, _category in fact_rows:
                 fact_text = (fact or "").strip()
@@ -118,10 +133,10 @@ class MemoryStore:
                 if score > 0:
                     fact_matches.append((score, fact_text))
 
-            fact_matches.sort(reverse=True)
+            fact_matches.sort(key=lambda item: item[0], reverse=True)
             if fact_matches:
                 parts.append("--- Facts about you ---")
-                for _, fact_text in fact_matches[:3]:
+                for _, fact_text in fact_matches[:_FACT_OUTPUT_LIMIT]:
                     parts.append(fact_text)
 
         return "\n".join(parts) if parts else ""
@@ -146,8 +161,8 @@ def get_default_store() -> MemoryStore:
     return _DEFAULT_STORE
 
 
-def store_exchange(user_input: str, jarvis_response: str) -> None:
-    get_default_store().store_exchange(user_input, jarvis_response)
+def store_exchange(user_input: str, assistant_response: str) -> None:
+    get_default_store().store_exchange(user_input, assistant_response)
 
 
 def store_fact(fact: str, category: str = "general") -> None:

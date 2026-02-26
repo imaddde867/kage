@@ -5,12 +5,12 @@ Kage (影) — Personal AI System
 Entry point. Runs the always-on voice loop.
 
 Usage:
-    cd ~/Documents/GitHub/personal/jarvis
+    cd ~/Documents/GitHub/personal/kage
     source .venv/bin/activate
     python main.py
 
-Say "Hey Jarvis" to activate → Kage responds → you speak → it responds aloud.
-(Custom wake word "Hey Kage" coming in a future update.)
+Say your configured wake word (default: "Hey Jarvis") to activate.
+Kage responds, you speak, and it replies aloud.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ class AssistantRuntime:
         self.speaker.load_engine()
 
     def boot(self) -> None:
+        wake_word_display = self.settings.wake_word.title()
         print()
         print("  ╔══════════════════════════════════╗")
         print("  ║     KAGE (影)  —  Online         ║")
@@ -54,7 +55,7 @@ class AssistantRuntime:
         print(f"  ║  User  : {self.settings.user_name:<24}║")
         print("  ╚══════════════════════════════════╝")
         print()
-        print("  Say 'Hey Jarvis' to activate.\n")
+        print(f"  Say '{wake_word_display}' to activate.\n")
         self.speaker.speak(
             f"Kage is online. I'm here whenever you need me, {self.settings.user_name}."
         )

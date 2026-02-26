@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -28,6 +31,76 @@ def _resolve_voice(name: str) -> str:
     return VOICE_MAP.get(name, "expr-voice-2-m")
 
 
+def _configure_phonemizer_espeak_library() -> None:
+    """
+    phonemizer sometimes fails to locate Homebrew's espeak shared library on macOS
+    even when the `espeak` binary is installed. Try common dylib locations and
+    pin the backend library before KittenTTS initializes.
+    """
+    try:
+        from phonemizer.backend import EspeakBackend
+    except Exception:
+        return
+
+    # If phonemizer already works, leave its resolution untouched.
+    try:
+        EspeakBackend(language="en-us")
+        return
+    except Exception:
+        pass
+
+    candidates: list[Path] = []
+    espeak_bin = shutil.which("espeak") or shutil.which("espeak-ng")
+    if espeak_bin:
+        lib_dir = Path(espeak_bin).resolve().parent.parent / "lib"
+        candidates.extend(sorted(lib_dir.glob("libespeak-ng*.dylib")))
+        candidates.extend(sorted(lib_dir.glob("libespeak*.dylib")))
+    for lib_dir in (Path("/opt/homebrew/lib"), Path("/usr/local/lib"), Path("/opt/local/lib")):
+        candidates.extend(sorted(lib_dir.glob("libespeak-ng*.dylib")))
+        candidates.extend(sorted(lib_dir.glob("libespeak*.dylib")))
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate_str = str(candidate)
+        if candidate_str in seen:
+            continue
+        seen.add(candidate_str)
+        try:
+            EspeakBackend.set_library(candidate_str)
+            EspeakBackend(language="en-us")
+            os.environ.setdefault("PHONEMIZER_ESPEAK_LIBRARY", candidate_str)
+            return
+        except Exception:
+            continue
+
+    # Restore default behavior if none of the candidates worked.
+    try:
+        EspeakBackend.set_library(None)
+    except Exception:
+        pass
+
+
+def _resolve_kittentts_model_path(value: str) -> str | None:
+    """
+    kittentts expects a local ONNX file path. If the configured value is empty
+    or not a readable file (for example a Hugging Face repo id), fall back to
+    the library default model download by returning None.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return None
+
+    path = Path(raw).expanduser()
+    if path.is_file():
+        return str(path)
+
+    print(
+        f"[Speaker] Ignoring KITTENTTS_MODEL='{raw}' (expected local .onnx file path). "
+        "Using KittenTTS default model."
+    )
+    return None
+
+
 class SpeakerService:
     def __init__(self, *, settings: config.Settings | None = None) -> None:
         self.settings = settings or config.get_settings()
@@ -43,9 +116,11 @@ class SpeakerService:
         print("[Speaker] Loading KittenTTS model...")
 
         try:
+            _configure_phonemizer_espeak_library()
             from kittentts import KittenTTS
 
-            self._model = KittenTTS(self.settings.kittentts_model)
+            model_path = _resolve_kittentts_model_path(self.settings.kittentts_model)
+            self._model = KittenTTS(model_path=model_path) if model_path else KittenTTS()
             self._use_kittentts = True
             print(
                 f"[Speaker] KittenTTS ready. Voice: {self.settings.tts_voice} "
@@ -57,7 +132,8 @@ class SpeakerService:
             print("[Speaker] Falling back to macOS say.")
         except Exception as exc:
             print(f"[Speaker] KittenTTS failed to load: {exc}")
-            print("[Speaker] If you see espeak errors, run: brew install espeak")
+            if "espeak" in str(exc).lower():
+                print("[Speaker] If you see espeak errors, run: brew install espeak")
             print("[Speaker] Falling back to macOS say.")
 
     @staticmethod
