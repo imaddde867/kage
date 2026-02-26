@@ -1,7 +1,5 @@
 # Kage (影) — A Personal AI That Lives With You
 
-> Not an app you open. A presence that stays with you.
-
 Kage is an always-on, fully local personal AI for your Mac.
 
 The goal is simple: build something like Siri, but actually smart, actually useful, and actually aware of your life over time.
@@ -37,14 +35,14 @@ If you say you’re about to spend money, Kage should remember what you told you
 
 ## Stack (Current)
 
-| Layer | Tool |
-|---|---|
-| LLM | `qwen3:8b` via Ollama |
-| STT | `faster-whisper` |
-| TTS | `KittenTTS` (fallback: macOS `say`) |
-| Wake word | `openwakeword` (`hey_jarvis`) |
-| Memory | SQLite |
-| Audio I/O | `sounddevice` |
+| Layer        | Tool                                       |
+| ------------ | ------------------------------------------ |
+| LLM          | `qwen3:8b` via Ollama                      |
+| STT          | `faster-whisper`                           |
+| TTS          | `KittenTTS` (fallback: macOS `say`)        |
+| Wake word    | `openwakeword` (`hey_jarvis`)              |
+| Memory       | SQLite                                     |
+| Audio I/O    | `sounddevice`                              |
 | Integrations | AppleScript (Calendar / Reminders / Notes) |
 
 ## Setup (macOS, local only)
@@ -136,6 +134,4 @@ jarvis/
 
 ## Philosophy
 
-Kage is not a chatbot with a voice.
-
-It’s a local intelligence layer for your life: always present, memory-persistent, proactive, and honest.
+Kage shouldn't be a chatbot with a voice. It’s a local intelligence layer for your life: always present, memory-persistent, proactive, and honest.
