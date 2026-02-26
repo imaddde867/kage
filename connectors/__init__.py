@@ -1,5 +1,5 @@
 """
-Connectors — pull live context from your apps into Jarvis/Kage.
+Connectors — pull live context from your apps into Kage.
 
 Each connector exposes a get_context() -> str function.
 Call get_all_context() to get everything at once, ready for LLM injection.
