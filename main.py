@@ -1,7 +1,6 @@
 """
 Kage (影) — Personal AI System
 ────────────────────────────────
-"Shadow" in Japanese. Always present, always aware.
 
 Entry point. Runs the always-on voice loop.
 
@@ -56,7 +55,9 @@ class AssistantRuntime:
         print("  ╚══════════════════════════════════╝")
         print()
         print("  Say 'Hey Jarvis' to activate.\n")
-        self.speaker.speak(f"Kage is online. I'm here whenever you need me, {self.settings.user_name}.")
+        self.speaker.speak(
+            f"Kage is online. I'm here whenever you need me, {self.settings.user_name}."
+        )
 
     def shutdown(self) -> None:
         print("\n[Kage] Going offline.")
@@ -90,7 +91,9 @@ class AssistantRuntime:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.ERROR, format="[%(levelname)s] %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.ERROR, format="[%(levelname)s] %(name)s: %(message)s"
+    )
     runtime = AssistantRuntime()
     return runtime.run_forever()
 
