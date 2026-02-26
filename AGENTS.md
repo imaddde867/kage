@@ -9,7 +9,7 @@ Kage is a local Python voice assistant for macOS. Keep runtime code small and mo
 - `core/`: assistant services (`listener.py`, `speaker.py`, `brain.py`, `memory.py`)
 - `connectors/`: Apple app integrations (`calendar.py`, `reminders.py`, `notes.py`) plus
   shared AppleScript helper (`_apple.py`)
-- `data/memory/`: local SQLite memory database (`jarvis_memory.db`)
+- `data/memory/`: local SQLite memory database (`kage_memory.db`, legacy `jarvis_memory.db` may exist)
 - `README.md`: setup, usage, and product vision
 
 Put new assistant logic in `core/`; add external integrations under `connectors/`.
@@ -56,6 +56,6 @@ logs/screenshots if audio or connector behavior changed.
 
 ## Security & Configuration Tips
 
-Never commit `.env` or `data/memory/jarvis_memory.db`. Kage handles personal context
+Never commit `.env` or `data/memory/*.db`. Kage handles personal context
 (Calendar, Reminders, Notes), so keep processing local-first and avoid adding cloud
 dependencies without explicit documentation.
