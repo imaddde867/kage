@@ -23,7 +23,6 @@ This repository is an early local runtime for Kage on macOS:
 ## Why Kage
 
 Most assistants start from zero every conversation. Kage should do the opposite.
-
 If you say you’re about to spend money, Kage should remember what you told yourself two months ago. If you’re drifting from a goal, it should notice. If you forget something important, it should catch it. The point is continuity.
 
 ## Privacy
@@ -35,15 +34,15 @@ If you say you’re about to spend money, Kage should remember what you told you
 
 ## Stack (Current)
 
-| Layer        | Tool                                       |
-| ------------ | ------------------------------------------ |
-| LLM          | `qwen3:8b` via Ollama                      |
-| STT          | `faster-whisper`                           |
-| TTS          | `KittenTTS` (fallback: macOS `say`)        |
-| Wake word    | `openwakeword` (`hey_jarvis`)              |
-| Memory       | SQLite                                     |
-| Audio I/O    | `sounddevice`                              |
-| Integrations | AppleScript (Calendar / Reminders / Notes) |
+| Layer        | Tool                                        |
+| ------------ | ------------------------------------------- |
+| LLM          | `qwen3:8b` via Ollama                       |
+| STT          | `faster-whisper`                            |
+| TTS          | `KittenTTS` or macOS `say` (offline voices) |
+| Wake word    | `openwakeword` (`hey_jarvis`)               |
+| Memory       | SQLite                                      |
+| Audio I/O    | `sounddevice`                               |
+| Integrations | AppleScript (Calendar / Reminders / Notes)  |
 
 ## Setup (macOS, local only)
 
@@ -64,13 +63,6 @@ micromamba create -n kage python=3.11 pip -y
 micromamba activate kage
 ```
 
-Or venv:
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-```
-
 ### 3. Install dependencies
 
 ```bash
@@ -84,6 +76,25 @@ cp .env.example .env
 ```
 
 Review `.env` and set your name, model, voice, etc.
+
+To use macOS TTS as your primary engine (offline, real-time):
+
+```bash
+TTS_BACKEND=macos_say
+SAY_FALLBACK_VOICE="Eddy (English (US))"
+```
+
+To disable reasoning for faster responses on reasoning-capable models (for example `qwen3:8b`), set:
+
+```bash
+OLLAMA_THINK=false
+```
+
+List available local voices:
+
+```bash
+say -v '?'
+```
 
 ### 5. Run Kage
 
@@ -105,7 +116,7 @@ kage/
 ├── config.py               # Typed settings + env loading
 ├── core/
 │   ├── listener.py         # Wake word, recording, Whisper STT
-│   ├── speaker.py          # KittenTTS / macOS say
+│   ├── speaker.py          # TTS backend (KittenTTS or macOS say)
 │   ├── brain.py            # Prompt building + Ollama client + memory writes
 │   └── memory.py           # SQLite memory store + recall
 ├── connectors/

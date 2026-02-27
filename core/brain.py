@@ -12,6 +12,25 @@ from core.memory import MemoryStore, get_default_store
 
 logger = logging.getLogger(__name__)
 
+_LIVE_CONTEXT_HINTS = {
+    "calendar",
+    "event",
+    "events",
+    "meeting",
+    "meetings",
+    "schedule",
+    "scheduled",
+    "reminder",
+    "reminders",
+    "todo",
+    "task",
+    "tasks",
+    "note",
+    "notes",
+    "today",
+    "tomorrow",
+}
+
 _SYSTEM_PROMPT = """You are Kage (影), a personal AI assistant for {name}.
 
 Your name means "Shadow" in Japanese — you are always present, always aware, working quietly in the background of {name}'s life.
@@ -66,10 +85,15 @@ class BrainService:
             logger.exception("Failed to recall memory for query")
             return ""
 
+    @staticmethod
+    def should_collect_live_context(user_input: str) -> bool:
+        tokens = {token.strip(".,!?;:()[]{}\"'").lower() for token in user_input.split()}
+        return any(token in _LIVE_CONTEXT_HINTS for token in tokens)
+
     def build_payload(self, user_input: str) -> dict[str, Any]:
         system_prompt = self.build_system_prompt()
 
-        live_context = self.collect_live_context()
+        live_context = self.collect_live_context() if self.should_collect_live_context(user_input) else ""
         if live_context:
             system_prompt += f"\n\nLive context from your apps:\n{live_context}"
 
@@ -83,6 +107,7 @@ class BrainService:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_input},
             ],
+            "think": self.settings.ollama_think,
             "stream": False,
         }
 
@@ -92,6 +117,30 @@ class BrainService:
             json=payload,
             timeout=self.settings.ollama_timeout_seconds,
         )
+
+        if response.status_code == 400 and "think" in payload:
+            error_text = ""
+            try:
+                body = response.json()
+                if isinstance(body, dict):
+                    error_text = str(body.get("error", ""))
+            except ValueError:
+                error_text = response.text or ""
+
+            lowered = error_text.lower()
+            if "think" in lowered and any(token in lowered for token in ("unknown", "unsupported", "invalid")):
+                logger.warning(
+                    "Ollama server does not support 'think' payload option. "
+                    "Retrying request without it."
+                )
+                fallback_payload = dict(payload)
+                fallback_payload.pop("think", None)
+                response = self.session.post(
+                    f"{self.settings.ollama_base_url}/api/chat",
+                    json=fallback_payload,
+                    timeout=self.settings.ollama_timeout_seconds,
+                )
+
         response.raise_for_status()
         data = response.json()
 
