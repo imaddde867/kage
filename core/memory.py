@@ -20,8 +20,8 @@ class MemoryStore:
     db_path: Path | None = None
 
     def __post_init__(self) -> None:
-        default_path = Path(config.get_settings().memory_dir) / _DEFAULT_DB_FILENAME
-        base_path = Path(self.db_path) if self.db_path is not None else default_path
+        default_path = Path(config.get_settings().memory_dir).expanduser() / _DEFAULT_DB_FILENAME
+        base_path = Path(self.db_path).expanduser() if self.db_path is not None else default_path
         self.db_path = base_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
