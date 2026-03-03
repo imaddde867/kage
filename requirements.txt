@@ -1,24 +1,18 @@
 # LLM
 ollama
+requests
 
 # Speech to text — Apple native (fast, hardware-accelerated, no model load)
 SpeechRecognition
-# Speech to text fallback — local Whisper (runs on CPU, no GPU needed)
+# Speech to text fallback — local Whisper
 faster-whisper
 
-# Audio recording + playback
+# Audio recording
 sounddevice
 numpy
-soundfile
 
 # Wake word detection
 openwakeword
 
-# TTS — AVFoundation (gap-free streaming, native macOS)
-pyobjc-framework-AVFoundation
-# TTS (neural, local, CPU-only, ~25MB model — optional)
-kittentts
-
 # Utilities
 python-dotenv
-requests
