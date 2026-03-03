@@ -1,143 +1,115 @@
-# Kage (影) — A Personal AI That Lives With You
+# Kage (影)
 
-Kage is an always-on, fully local personal AI for your Mac.
+A fully local, always-on personal AI for macOS. Wake word activates it, you speak, it responds aloud. No cloud, no subscriptions, no data leaving your machine.
 
-The goal is simple: build something like Siri, but actually smart, actually useful, and actually aware of your life over time.
+**Current state:** functional voice loop. Memory persists across sessions. No calendar/reminders integration yet (removed — see roadmap).
 
-Kage should know your calendar, reminders, notes, goals, habits, and the promises you made to yourself. It should remember what you said last week, connect dots across time, and nudge you when it matters. Not just answer questions, but think with you.
-
-Long term, Kage is a second brain: part coach, part best friend, part technical collaborator, part memory system. And it runs on your machine. No cloud. No surveillance. It's yours.
-
-## Current Status
-
-- Voice loop: wake word → speech-to-text → LLM → text-to-speech
-- **Streaming responses** — first sentence spoken within ~1s of Ollama starting to reply
-- **Apple native STT** — hardware-accelerated, no model download, instant start
-- **macOS `say` TTS** — Siri-quality neural voices, zero latency
-- Local memory stored in SQLite across sessions
-- Live context injected from Apple Calendar, Reminders, Notes, and **Things 3**
-- Ollama-backed local LLM (qwen3.5:9b)
-
-> Current wake word is **"Hey Jarvis"** — no pre-trained `hey_kage` model exists yet.
-
-## Why Kage
-
-Most assistants start from zero every conversation. Kage should do the opposite.
-If you say you're about to spend money, Kage should remember what you told yourself two months ago. If you're drifting from a goal, it should notice. If you forget something important, it should catch it. The point is continuity.
-
-## Privacy
-
-- Runs fully locally on your machine
-- Local Ollama models — no OpenAI, no cloud
-- Memory stored locally in SQLite
-- Apple STT runs on-device via the Neural Engine
+---
 
 ## Stack
 
-| Layer        | Tool                                                       |
-| ------------ | ---------------------------------------------------------- |
-| LLM          | `qwen3.5:9b` via Ollama (streaming)                        |
-| STT          | macOS native (`SpeechRecognition`) → Whisper fallback      |
-| TTS          | macOS `say` with neural voice (Siri-quality)               |
-| Wake word    | `openwakeword` (`hey_jarvis`)                              |
-| Memory       | SQLite                                                     |
-| Audio I/O    | `sounddevice`                                              |
-| Integrations | AppleScript (Calendar, Reminders, Notes, Things 3)         |
+| Layer | Tool | Why |
+|-------|------|-----|
+| LLM | [Ollama](https://ollama.com) | Local inference, simple HTTP API |
+| Wake word | [openwakeword](https://github.com/dscripka/openWakeWord) | Lightweight, CPU-only, works offline |
+| STT | macOS native (`SpeechRecognition`) | Hardware-accelerated, zero latency |
+| STT fallback | [faster-whisper](https://github.com/guillaumekleeven/faster-whisper) | CPU-only, no GPU needed |
+| TTS | macOS `say` | Built-in, no deps, Siri-quality neural voices |
+| Memory | SQLite | No server, simple, durable |
+| Audio | [sounddevice](https://python-sounddevice.readthedocs.io) | Clean cross-platform mic access |
 
-## Setup (macOS, local only)
+---
 
-### 1. Install and start Ollama
+## Setup
 
-```bash
-ollama serve
-# in another terminal
-ollama pull qwen3.5:9b
-```
-
-### 2. Create Python environment
+**Prerequisites:** Python 3.11, [Ollama](https://ollama.com) installed and running.
 
 ```bash
-micromamba create -n kage python=3.11 pip -y
-micromamba activate kage
-```
+# 1. Create environment
+micromamba create -n kage python=3.11 pip -y && micromamba activate kage
 
-### 3. Install dependencies
-
-```bash
+# 2. Install dependencies
 pip install -r requirements.txt
-```
 
-### 4. Configure environment
-
-```bash
+# 3. Configure
 cp .env.example .env
+# Edit .env — at minimum set OLLAMA_MODEL and MACOS_SAY_VOICE
+
+# 4. Pull the model
+ollama pull qwen3.5:9b
+
+# 5. Run
+python main.py --text     # text mode (no mic needed)
+python main.py            # voice mode (wake word → speak → respond)
 ```
 
-Key settings in `.env`:
-
+**List available voices:**
 ```bash
-OLLAMA_MODEL=qwen3.5:9b
-OLLAMA_THINK=false        # faster direct answers
-
-STT_BACKEND=apple         # macOS native — no model load, instant start
-                          # set to "whisper" for fully offline fallback
-
-TTS_BACKEND=macos_say
-MACOS_SAY_VOICE=Ava (Enhanced)   # list voices with: say -v '?'
+say -v '?'
 ```
 
-### 5. Run Kage
+---
 
-```bash
-python main.py          # voice mode (wake word → listen → speak)
-python main.py --text   # text chat mode (no mic/speaker needed)
+## Configuration (`.env`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OLLAMA_MODEL` | `qwen3.5:9b` | Model to use |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server |
+| `MACOS_SAY_VOICE` | `Ava (Enhanced)` | TTS voice |
+| `STT_BACKEND` | `apple` | `apple` or `whisper` |
+| `WAKE_WORD` | `hey jarvis` | Display name |
+| `WAKE_WORD_MODEL` | `hey_jarvis` | openwakeword model file |
+| `WAKE_WORD_THRESHOLD` | `0.5` | Detection sensitivity (0–1) |
+| `USER_NAME` | `Imad` | Your name (used in prompts) |
+| `MEMORY_DIR` | `./data/memory` | SQLite DB location |
+
+---
+
+## Architecture
+
+```
+main.py
+├── voice mode: ListenerService → BrainService → speak()
+└── text mode:  input()         → BrainService → speak()
+
+core/
+├── brain.py     BrainService.think_stream() — Ollama streaming, yields sentences
+├── listener.py  ListenerService — wake word + record + STT
+├── memory.py    MemoryStore — SQLite conversations, keyword recall
+└── speaker.py   speak() — macOS say subprocess
+
+config.py        Settings dataclass, loaded once via lru_cache
+data/memory/     kage_memory.db (gitignored)
 ```
 
-## Usage
+---
 
-Say **"Hey Jarvis"** → Kage acknowledges → speak naturally → Kage replies aloud, sentence by sentence as the model generates.
+## Development principles
 
-Kage pulls live context from your Apple apps (Calendar, Reminders, Notes, Things 3) when relevant and combines it with local memory before calling the LLM.
+These rules exist to avoid accumulating the complexity that was just removed:
 
-## Project Structure
+1. **One backend per concern.** No fallback chains. Pick one and make it work.
+2. **No feature until it works end-to-end.** Don't wire up half-built code.
+3. **No abstraction until it's needed 3+ times.** Duplicate twice; abstract on the third.
+4. **Connectors are opt-in plugins, not core.** Calendar/Reminders should not be in the hot path.
+5. **Test before wiring.** If you can't test it in isolation, don't add it.
 
-```text
-kage/
-├── main.py                 # Runtime orchestration loop
-├── config.py               # Typed settings + env loading
-├── core/
-│   ├── listener.py         # Wake word, recording, STT (Apple native or Whisper)
-│   ├── speaker.py          # TTS backend (macOS say or KittenTTS)
-│   ├── brain.py            # Prompt building + streaming Ollama client + memory writes
-│   └── memory.py           # SQLite memory store + recall
-├── connectors/
-│   ├── __init__.py         # ConnectorManager aggregation
-│   ├── _apple.py           # Shared AppleScript helpers
-│   ├── calendar.py         # Apple Calendar context
-│   ├── reminders.py        # Apple Reminders context
-│   ├── notes.py            # Apple Notes context
-│   └── things.py           # Things 3 context (Today + Inbox)
-├── data/
-│   └── memory/             # Local SQLite DB
-└── requirements.txt
-```
+---
 
 ## Roadmap
 
-- [x] Local voice loop (wake → listen → think → speak)
-- [x] Persistent memory (SQLite)
-- [x] Calendar / Reminders / Notes connectors
-- [x] Things 3 connector
-- [x] Streaming LLM → TTS (sentence-by-sentence, ~1s first-word latency)
-- [x] Apple native STT (hardware-accelerated, instant start)
-- [x] macOS neural TTS (Siri-quality voice)
-- [ ] Custom **"Hey Kage"** wake word
-- [ ] Semantic memory (embeddings + retrieval)
-- [ ] Proactive nudges / scheduled check-ins
-- [ ] More life context (goals, finances, messaging, projects)
-- [ ] Better long-term memory modeling (not just keyword recall)
-- [ ] Multi-device access while staying local-first
+Ordered by value delivered:
 
-## Philosophy
+- [ ] **Better memory recall** — BM25 or embeddings instead of keyword matching
+- [ ] **Streaming STT** — start transcribing while the user is still speaking
+- [ ] **Calendar connector** — read-only, opt-in, only injected when relevant
+- [ ] **Web search** — on-demand via a tool call, not always-on
+- [ ] **Multi-turn context** — keep last N turns in the prompt window
+- [ ] **Wake word customization** — train a custom openwakeword model
 
-Kage shouldn't be a chatbot with a voice. It's a local intelligence layer for your life: always present, memory-persistent, proactive, and honest.
+---
+
+## What was removed
+
+KittenTTS, AVSpeech, phonemizer, connectors (calendar/reminders/notes/things), facts table, multi-backend TTS switching, streaming session complexity. These added code weight without proportional value at this stage. They can be reintroduced one at a time when the foundation is solid.
