@@ -1,7 +1,7 @@
 """
 Kage (影) — Local Personal AI for macOS
-Voice: wake word → STT → LLM → say
-Text: input() → LLM → print + say
+Voice: wake word → STT → LLM → Kokoro TTS
+Text: input() → LLM → print + Kokoro TTS
 """
 
 from __future__ import annotations
