@@ -9,6 +9,7 @@ def get_context() -> str:
     Returns a formatted string for LLM context injection.
     """
     script = """
+    if application "Things3" is not running then return ""
     tell application "Things3"
         set output to ""
         set todayItems to to dos of list "Today"

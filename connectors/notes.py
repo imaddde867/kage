@@ -14,6 +14,7 @@ def get_context() -> str:
     Returns a formatted string for LLM context injection.
     """
     script = f"""
+    if application "Notes" is not running then return ""
     set output to ""
     tell application "Notes"
         set theNotes to every note
