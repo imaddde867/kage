@@ -80,13 +80,16 @@ class AssistantRuntime:
 
     def respond(self, user_text: str) -> None:
         print("\n[Kage]: ", end="", flush=True)
+        sentences: list[str] = []
 
         def on_sentence(s: str) -> None:
             print(s, end=" ", flush=True)
-            self.speaker.speak(s, display=False)
+            sentences.append(s)
 
         self.brain.think_stream(user_text, on_sentence)
         print("\n")
+        if sentences:
+            self.speaker.speak(" ".join(sentences), display=False)
 
     def run_once(self) -> None:
         self.listener.wait_for_wake_word()
