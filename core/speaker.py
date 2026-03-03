@@ -301,11 +301,10 @@ class SpeakerService:
         except subprocess.CalledProcessError as exc:
             print(f"[Speaker] macOS say failed ({exc.returncode}).")
 
-    def speak(self, text: str) -> None:
-        """
-        Speak text aloud using the selected TTS backend.
-        """
-        print(f"\n[Kage]: {text}\n")
+    def speak(self, text: str, *, display: bool = True) -> None:
+        """Speak text aloud. Pass display=False to suppress the console print (e.g. when streaming)."""
+        if display:
+            print(f"\n[Kage]: {text}\n")
         clean = _sanitize_text(text)
         if not clean:
             return
