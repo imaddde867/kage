@@ -11,6 +11,9 @@ class _FakeMemory:
     def __init__(self, turns: list[tuple[str, str]]) -> None:
         self._turns = turns
 
+    def recall(self, query: str, n_results: int = 5, *, char_budget: int = 900) -> str:
+        return ""
+
     def recent_turns(self, limit: int = 4) -> list[tuple[str, str]]:
         if limit <= 0:
             return []
@@ -106,6 +109,56 @@ class BrainPolicyTests(unittest.TestCase):
 
         prompt = brain._system_prompt(text_mode=True)
         self.assertIn("Markdown, code blocks, and lists are allowed.", prompt)
+
+    def test_entity_context_injected_when_route_requests_it(self) -> None:
+        from core.brain_prompting import build_messages
+
+        messages = build_messages(
+            user_input="what should I work on?",
+            user_name="Test",
+            text_mode=False,
+            memory=_FakeMemory([]),
+            recent_turns=[],
+            policy_note="",
+            entity_context="Tasks: review the PR",
+        )
+        system = messages[0]["content"]
+        self.assertIn("Known facts about Test", system)
+        self.assertIn("review the PR", system)
+
+    def test_entity_context_absent_for_general_intent(self) -> None:
+        from core.brain_prompting import build_messages
+
+        messages = build_messages(
+            user_input="What is the capital of France?",
+            user_name="Test",
+            text_mode=False,
+            memory=_FakeMemory([]),
+            recent_turns=[],
+            policy_note="",
+            entity_context="",
+        )
+        system = messages[0]["content"]
+        self.assertNotIn("Known facts", system)
+
+    def test_total_system_prompt_under_1800_chars_with_entity_block(self) -> None:
+        from core.brain_prompting import build_messages
+
+        entity_block = (
+            "Tasks: review the PR (due 2026-03-04), finish report draft (due 2026-03-07)\n"
+            "Profile: location=Turku Finland"
+        )
+        messages = build_messages(
+            user_input="what should I work on?",
+            user_name="Test",
+            text_mode=False,
+            memory=_FakeMemory([]),
+            recent_turns=[],
+            policy_note="",
+            entity_context=entity_block,
+        )
+        system = messages[0]["content"]
+        self.assertLessEqual(len(system), 1800)
 
 
 if __name__ == "__main__":
