@@ -64,6 +64,7 @@ python main.py            # voice mode (wake word → speak → respond)
 | `INTERRUPT_HOLD_MS` | `220` | Required speech duration after wake hit |
 | `INTERRUPT_DEBOUNCE_MS` | `500` | Minimum gap between accepted interrupts |
 | `POST_TTS_GUARD_MS` | `250` | Delay before opening mic after TTS stops |
+| `TEXT_MODE_TTS_ENABLED` | `false` | Speak responses in `--text` mode |
 | `USER_NAME` | `Imad` | Your name (used in prompts) |
 | `ASSISTANT_NAME` | `Kage` | Canonical assistant name kept in text |
 | `TTS_NAME_OVERRIDE_ENABLED` | `true` | Apply spoken-name replacement before TTS |
@@ -71,6 +72,7 @@ python main.py            # voice mode (wake word → speak → respond)
 | `STT_NAME_NORMALIZATION_ENABLED` | `true` | Normalize recognized variants back to canonical name |
 | `STT_NAME_VARIANTS` | `kage,cage,kaj,kaige,kahge,ka-geh` | Comma-separated variants mapped to `ASSISTANT_NAME` |
 | `MEMORY_DIR` | `./data/memory` | SQLite DB location |
+| `RECENT_TURNS` | `4` | Number of latest turns injected as short-term chat context |
 
 ---
 
@@ -79,13 +81,16 @@ python main.py            # voice mode (wake word → speak → respond)
 ```
 main.py
 ├── voice mode: ListenerService → BrainService → speak()
-└── text mode:  input()         → BrainService → speak()
+└── text mode:  input()         → BrainService → print (optional speak)
 
 core/
 ├── audio_coordinator.py state machine for listen/think/speak + barge-in guards
-├── brain.py     BrainService.think_stream() — MLX streaming, yields sentences
+├── brain.py     BrainService orchestration (policy, memory, streaming dispatch)
+├── brain_generation.py backend loading + raw token streaming + perf stats
+├── brain_guardrails.py deterministic policy conflict/safety responses
+├── brain_prompting.py prompt templates + recent-turn assembly
 ├── listener.py  ListenerService — wake word + record + STT
-├── memory.py    MemoryStore — SQLite conversations, keyword recall
+├── memory.py    MemoryStore — SQLite conversations, bounded token-overlap recall
 └── speaker.py   speak() — mlx-audio Kokoro synthesis + playback
 
 config.py        Settings dataclass, loaded once via lru_cache
@@ -114,7 +119,7 @@ Ordered by value delivered:
 - [ ] **Streaming STT** — start transcribing while the user is still speaking
 - [ ] **Calendar connector** — read-only, opt-in, only injected when relevant
 - [ ] **Web search** — on-demand via a tool call, not always-on
-- [ ] **Multi-turn context** — keep last N turns in the prompt window
+- [ ] **Context budgeting** — tune recent-turn and long-term memory token budgets adaptively
 - [ ] **Wake word customization** — train a custom openwakeword model
 
 ---
