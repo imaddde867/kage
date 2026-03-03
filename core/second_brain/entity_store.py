@@ -118,6 +118,25 @@ class EntityStore:
                 (now, entity_id),
             )
 
+    def recall_personal_context(self, *, char_budget: int = 150) -> str:
+        """Profile + preferences only — always safe to inject regardless of intent."""
+        sections: list[str] = []
+
+        profiles = self.get_by_kind("profile", status="active")
+        if profiles:
+            items = [f"{e.key}={e.value}" for e in profiles]
+            sections.append(f"Profile: {', '.join(items)}")
+
+        prefs = self.get_by_kind("preference", status="active")
+        if prefs:
+            items = [e.value for e in prefs]
+            sections.append(f"Preferences: {', '.join(items)}")
+
+        result = "\n".join(sections)
+        if len(result) > char_budget:
+            result = result[: char_budget - 3].rstrip() + "..."
+        return result
+
     def recall_for_prompt(self, *, char_budget: int = 400) -> str:
         sections: list[str] = []
 

@@ -74,14 +74,15 @@ class BrainService:
         policy_note = _derive_policy_note(user_messages)
 
         entity_context = ""
-        if (
-            route is not None
-            and route.inject_entities
-            and hasattr(self, "_entity_store")
-        ):
-            entity_context = self._entity_store.recall_for_prompt(
-                char_budget=getattr(self.settings, "entity_recall_budget", 400)
-            )
+        if hasattr(self, "_entity_store"):
+            if route is not None and route.inject_entities:
+                # Full context: tasks + commitments + profile + preferences
+                entity_context = self._entity_store.recall_for_prompt(
+                    char_budget=getattr(self.settings, "entity_recall_budget", 400)
+                )
+            else:
+                # Always inject profile + preferences for personal coherence
+                entity_context = self._entity_store.recall_personal_context()
 
         return build_messages(
             user_input=user_input,
