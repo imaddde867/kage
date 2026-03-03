@@ -36,7 +36,7 @@ class MemoryStore:
                 CREATE TABLE IF NOT EXISTS conversations (
                     id TEXT PRIMARY KEY,
                     user_input TEXT,
-                    jarvis_response TEXT,
+                    kage_response TEXT,
                     timestamp TEXT
                 )
                 """
@@ -61,7 +61,7 @@ class MemoryStore:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO conversations (id, user_input, jarvis_response, timestamp)
+                INSERT INTO conversations (id, user_input, kage_response, timestamp)
                 VALUES (?, ?, ?, ?)
                 """,
                 (str(uuid.uuid4()), user_input, assistant_response, datetime.now().isoformat()),
@@ -90,7 +90,7 @@ class MemoryStore:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT user_input, jarvis_response
+                SELECT user_input, kage_response
                 FROM conversations
                 ORDER BY timestamp DESC
                 LIMIT ?
