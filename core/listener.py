@@ -24,7 +24,6 @@ class ListenerService:
         self._wake_model: Any | None = None
         self._models_loaded = False
         self._stt_backend = self._normalize_backend(self.settings.stt_backend)
-        self._interrupt_policy = self._normalize_interrupt_policy(self.settings.interrupt_policy)
         self._interrupt_wake_armed = False
         self._interrupt_speech_frames = 0
         self._interrupt_wake_deadline = 0.0
@@ -35,13 +34,6 @@ class ListenerService:
         if raw in {"whisper", "faster_whisper", "faster-whisper"}:
             return "whisper"
         return "apple"
-
-    @staticmethod
-    def _normalize_interrupt_policy(value: str) -> str:
-        raw = (value or "").strip().lower().replace("-", "_")
-        if raw in {"wake_word_then_speech", "wake_then_speech", "wake_word_and_speech"}:
-            return "wake_word_then_speech"
-        return "wake_word_then_speech"
 
     @staticmethod
     def _require_sounddevice() -> Any:
@@ -116,8 +108,6 @@ class ListenerService:
 
     def detect_interrupt(self, audio_chunk: np.ndarray) -> bool:
         if self._wake_model is None:
-            return False
-        if self._interrupt_policy != "wake_word_then_speech":
             return False
 
         flat = np.asarray(audio_chunk, dtype=np.int16).reshape(-1)

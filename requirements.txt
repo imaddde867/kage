@@ -1,11 +1,8 @@
-# LLM — Ollama backend (HTTP, Metal GPU via llama.cpp)
-ollama
-requests
-
-# LLM — MLX backend (Apple Neural Engine + GPU, direct Python, no daemon)
-# Install: pip install mlx-lm
+# LLM — MLX backends (Apple Neural Engine + GPU, direct Python)
 # Models: https://huggingface.co/mlx-community
 mlx-lm
+mlx-vlm
+transformers
 
 # TTS — Kokoro-82M via MLX Audio
 mlx-audio[tts]
