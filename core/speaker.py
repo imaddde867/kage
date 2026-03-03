@@ -30,7 +30,7 @@ _KITTENTTS_PROFILE_SPECS = {
     "nano": None,  # library default loader (currently nano)
     "mini": ("KittenML/kitten-tts-mini-0.8", "kitten_tts_mini_v0_8.onnx"),
 }
-_DEFAULT_TTS_BACKEND = "kittentts"
+_FALLBACK_TTS_BACKEND = "kittentts"  # used when TTS_BACKEND is set to an unknown value
 
 
 def _normalize_tts_backend(value: str) -> str:
@@ -224,9 +224,9 @@ class SpeakerService:
         if self._tts_backend != "kittentts":
             print(
                 f"[Speaker] Unknown TTS_BACKEND='{self.settings.tts_backend}'. "
-                f"Using '{_DEFAULT_TTS_BACKEND}'."
+                f"Using '{_FALLBACK_TTS_BACKEND}'."
             )
-            self._tts_backend = _DEFAULT_TTS_BACKEND
+            self._tts_backend = _FALLBACK_TTS_BACKEND
 
         print("[Speaker] Loading KittenTTS model...")
 
