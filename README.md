@@ -10,7 +10,7 @@ A fully local, always-on personal AI for macOS. Wake word activates it, you spea
 
 | Layer | Tool | Why |
 |-------|------|-----|
-| LLM | [Ollama](https://ollama.com) | Local inference, simple HTTP API |
+| LLM | [MLX-VLM](https://github.com/Blaizzy/mlx-vlm) / [MLX-LM](https://github.com/ml-explore/mlx-lm) | Fast local inference on Apple Silicon |
 | Wake word | [openwakeword](https://github.com/dscripka/openWakeWord) | Lightweight, CPU-only, works offline |
 | STT | macOS native (`SpeechRecognition`) | Hardware-accelerated, zero latency |
 | STT fallback | [faster-whisper](https://github.com/guillaumekleeven/faster-whisper) | CPU-only, no GPU needed |
@@ -22,7 +22,7 @@ A fully local, always-on personal AI for macOS. Wake word activates it, you spea
 
 ## Setup
 
-**Prerequisites:** Python 3.11, [Ollama](https://ollama.com) installed and running.
+**Prerequisites:** Python 3.11 on Apple Silicon.
 
 ```bash
 # 1. Create environment
@@ -35,10 +35,7 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env — set your model and Kokoro voice preset
 
-# 4. Pull the model
-ollama pull qwen3.5:9b
-
-# 5. Run
+# 4. Run
 python main.py --text     # text mode (no mic needed)
 python main.py            # voice mode (wake word → speak → respond)
 ```
@@ -51,8 +48,9 @@ python main.py            # voice mode (wake word → speak → respond)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OLLAMA_MODEL` | `qwen3.5:9b` | Model to use |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server |
+| `LLM_BACKEND` | `mlx_vlm` | `mlx_vlm` for Qwen3.5, `mlx` for text-only MLX-LM models |
+| `MLX_MODEL` | `mlx-community/Qwen3.5-4B-MLX-4bit` | LLM model repo |
+| `MLX_MAX_TOKENS` | `150` | Max generation length |
 | `KOKORO_MODEL` | `mlx-community/Kokoro-82M-bf16` | Kokoro model repo |
 | `KOKORO_VOICE` | `af_heart` | Voice preset |
 | `KOKORO_LANG_CODE` | `en-us` | Accent/language (`en-us`, `en-gb`, `ja`, `zh`) |
@@ -62,7 +60,6 @@ python main.py            # voice mode (wake word → speak → respond)
 | `WAKE_WORD_MODEL` | `hey_jarvis` | openwakeword model file |
 | `WAKE_WORD_THRESHOLD` | `0.5` | Detection sensitivity (0–1) |
 | `ALLOW_BARGE_IN` | `true` | Allow interrupting Kage while it speaks |
-| `INTERRUPT_POLICY` | `wake_word_then_speech` | Barge-in trigger policy |
 | `INTERRUPT_MIN_SCORE` | `0.55` | Wake score threshold during TTS |
 | `INTERRUPT_HOLD_MS` | `220` | Required speech duration after wake hit |
 | `INTERRUPT_DEBOUNCE_MS` | `500` | Minimum gap between accepted interrupts |
@@ -86,7 +83,7 @@ main.py
 
 core/
 ├── audio_coordinator.py state machine for listen/think/speak + barge-in guards
-├── brain.py     BrainService.think_stream() — Ollama streaming, yields sentences
+├── brain.py     BrainService.think_stream() — MLX streaming, yields sentences
 ├── listener.py  ListenerService — wake word + record + STT
 ├── memory.py    MemoryStore — SQLite conversations, keyword recall
 └── speaker.py   speak() — mlx-audio Kokoro synthesis + playback

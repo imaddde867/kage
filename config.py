@@ -63,9 +63,6 @@ def _env_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
 class Settings:
     # LLM
     llm_backend: str
-    ollama_base_url: str
-    ollama_model: str
-    ollama_timeout_seconds: int
     mlx_model: str
     mlx_draft_model: str   # empty string = disabled; same-family smaller model for speculative decoding
     mlx_max_tokens: int
@@ -103,7 +100,6 @@ class Settings:
 
     # Turn-taking
     allow_barge_in: bool
-    interrupt_policy: str
     interrupt_min_score: float
     interrupt_hold_ms: int
     interrupt_debounce_ms: int
@@ -119,11 +115,8 @@ class Settings:
 @lru_cache(maxsize=1)
 def get() -> Settings:
     return Settings(
-        llm_backend=_env_str("LLM_BACKEND", "mlx"),
-        ollama_base_url=_env_str("OLLAMA_BASE_URL", "http://localhost:11434"),
-        ollama_model=_env_str("OLLAMA_MODEL", "qwen3.5:9b"),
-        ollama_timeout_seconds=_env_int("OLLAMA_TIMEOUT_SECONDS", 60),
-        mlx_model=_env_str("MLX_MODEL", "mlx-community/Qwen2.5-7B-Instruct-4bit"),
+        llm_backend=_env_str("LLM_BACKEND", "mlx_vlm"),
+        mlx_model=_env_str("MLX_MODEL", "mlx-community/Qwen3.5-4B-MLX-4bit"),
         mlx_draft_model=_env_str("MLX_DRAFT_MODEL", ""),
         mlx_max_tokens=_env_int("MLX_MAX_TOKENS", 150),
         temperature=_env_float("TEMPERATURE", 0.3),
@@ -146,7 +139,6 @@ def get() -> Settings:
         silence_duration=_env_float("SILENCE_DURATION", 1.5),
         max_record_seconds=_env_int("MAX_RECORD_SECONDS", 30),
         allow_barge_in=_env_bool("ALLOW_BARGE_IN", True),
-        interrupt_policy=_env_str("INTERRUPT_POLICY", "wake_word_then_speech"),
         interrupt_min_score=_env_float("INTERRUPT_MIN_SCORE", 0.55),
         interrupt_hold_ms=_env_int("INTERRUPT_HOLD_MS", 220),
         interrupt_debounce_ms=_env_int("INTERRUPT_DEBOUNCE_MS", 500),

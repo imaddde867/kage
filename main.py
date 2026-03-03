@@ -12,7 +12,10 @@ import threading
 import time
 
 import numpy as np
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except ImportError:  # pragma: no cover - optional for text/bench-only mode
+    sd = None  # type: ignore[assignment]
 
 import config
 from core.audio_coordinator import AudioCoordinator, AudioState
@@ -28,6 +31,10 @@ def _monitor_barge_in(
     coordinator: AudioCoordinator,
     stop_event: threading.Event,
 ) -> None:
+    if sd is None:
+        logging.warning("sounddevice unavailable; disabling barge-in monitor")
+        return
+
     chunk = listener.settings.wake_word_chunk_size
     listener.reset_interrupt_detector()
     try:
@@ -49,6 +56,19 @@ def _monitor_barge_in(
         logging.exception("Barge-in monitor error")
 
 
+def _say(text: str, *, coordinator: AudioCoordinator | None = None) -> None:
+    speak(text)
+    if coordinator is not None:
+        coordinator.end_speaking()
+
+
+def _listen_once(listener: ListenerService, coordinator: AudioCoordinator) -> str:
+    coordinator.transition(AudioState.LISTENING)
+    coordinator.wait_for_listen_window()
+    audio = listener.record_until_silence()
+    return listener.transcribe(audio).strip()
+
+
 def respond(
     brain: BrainService,
     user_text: str,
@@ -62,6 +82,20 @@ def respond(
     t_first_sentence: float | None = None
     tts_total = 0.0
     interrupted = False
+    monitor_stop: threading.Event | None = None
+    monitor_thread: threading.Thread | None = None
+    cancel_token: threading.Event | None = None
+
+    if listener is not None and coordinator is not None and coordinator.allow_barge_in:
+        coordinator.begin_speaking()
+        cancel_token = coordinator.cancel_token
+        monitor_stop = threading.Event()
+        monitor_thread = threading.Thread(
+            target=_monitor_barge_in,
+            args=(listener, coordinator, monitor_stop),
+            daemon=True,
+        )
+        monitor_thread.start()
 
     stream = brain.think_stream(user_text)
     try:
@@ -70,22 +104,10 @@ def respond(
                 t_first_sentence = time.perf_counter()
             print(sentence, end=" ", flush=True)
 
-            if listener is not None and coordinator is not None and coordinator.allow_barge_in:
-                coordinator.begin_speaking()
-                monitor_stop = threading.Event()
-                monitor_thread = threading.Thread(
-                    target=_monitor_barge_in,
-                    args=(listener, coordinator, monitor_stop),
-                    daemon=True,
-                )
-                monitor_thread.start()
+            if cancel_token is not None:
                 t_speak = time.perf_counter()
-                result = speak(sentence, cancel_token=coordinator.cancel_token)
+                result = speak(sentence, cancel_token=cancel_token)
                 tts_total += time.perf_counter() - t_speak
-                monitor_stop.set()
-                monitor_thread.join(timeout=0.3)
-                coordinator.end_speaking(interrupted=result.interrupted)
-
                 if result.interrupted:
                     interrupted = True
                     break
@@ -94,6 +116,12 @@ def respond(
                 speak(sentence)
                 tts_total += time.perf_counter() - t_speak
     finally:
+        if monitor_stop is not None:
+            monitor_stop.set()
+        if monitor_thread is not None:
+            monitor_thread.join(timeout=0.3)
+        if cancel_token is not None and coordinator is not None:
+            coordinator.end_speaking(interrupted=interrupted)
         close = getattr(stream, "close", None)
         if callable(close):
             close()
@@ -131,18 +159,13 @@ def run_voice(settings: config.Settings, timing: bool = False) -> None:
         try:
             coordinator.transition(AudioState.IDLE)
             listener.wait_for_wake_word()
-            speak("Yeah?")
-            coordinator.end_speaking()
+            _say("Yeah?", coordinator=coordinator)
 
             while True:
-                coordinator.transition(AudioState.LISTENING)
-                coordinator.wait_for_listen_window()
-                audio = listener.record_until_silence()
-                user_text = listener.transcribe(audio)
+                user_text = _listen_once(listener, coordinator)
                 if not user_text:
                     coordinator.transition(AudioState.IDLE)
-                    speak("Didn't catch that.")
-                    coordinator.end_speaking()
+                    _say("Didn't catch that.", coordinator=coordinator)
                     break
 
                 print(f"[You]: {user_text}")
@@ -202,7 +225,7 @@ _BENCH_PROMPTS = [
 def run_bench(settings: config.Settings) -> None:
     """Pure inference benchmark — no TTS, no memory, prints accurate tok/s."""
     print(f"  Backend    : {settings.llm_backend}")
-    print(f"  Model      : {settings.ollama_model if settings.llm_backend == 'ollama' else settings.mlx_model}")
+    print(f"  Model      : {settings.mlx_model}")
     if settings.llm_backend == "mlx" and settings.mlx_draft_model:
         print(f"  Draft      : {settings.mlx_draft_model}  (speculative decoding)")
 

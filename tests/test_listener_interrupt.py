@@ -22,7 +22,6 @@ class _FakeWakeModel:
 def _interrupt_settings() -> config.Settings:
     return replace(
         config.get(),
-        interrupt_policy="wake_word_then_speech",
         interrupt_min_score=0.5,
         interrupt_hold_ms=180,
         silence_threshold=50,

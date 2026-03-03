@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import json
 import logging
 import re
 import time
 from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
-
-import requests
 
 import config
 from core.memory import MemoryStore
@@ -38,27 +35,26 @@ class BrainService:
     def __init__(self, *, settings: config.Settings | None = None, memory: MemoryStore | None = None) -> None:
         self.settings = settings or config.get()
         self.memory = memory or MemoryStore()
-        self.last_stats: dict = {}
+        self.last_stats: dict[str, Any] = {}
+        self._backend = self.settings.llm_backend.strip().lower()
 
-        if self.settings.llm_backend == "mlx_vlm":
+        if self._backend == "mlx_vlm":
             self._init_mlx_vlm()
-        elif self.settings.llm_backend == "mlx":
+        elif self._backend == "mlx":
             self._init_mlx()
         else:
-            self.session = requests.Session()
+            raise ValueError(
+                f"Unsupported LLM_BACKEND '{self.settings.llm_backend}'. "
+                "Use one of: mlx_vlm, mlx."
+            )
 
-    # ── MLX-VLM (Qwen3.5 and other VLMs — text-only inference, no image needed) ──
+    # ── MLX-VLM (Qwen3.5 and other VLMs — text-only inference) ──
 
     def _init_mlx_vlm(self) -> None:
-        # Load model weights and tokenizer separately — bypasses the broken
-        # AutoVideoProcessor.from_pretrained path in transformers (torchvision absent
-        # + Qwen3.5 video processor class not yet in transformers' registry = crash).
-        # stream_generate works fine with a plain tokenizer + detokenizer for text-only
-        # inference (no images/video), which is all we need for voice.
-        from mlx_vlm.utils import load_model, get_model_path  # type: ignore[import]
-        from mlx_vlm.tokenizer_utils import load_tokenizer as _load_det  # type: ignore[import]
-        from mlx_vlm.utils import StoppingCriteria  # type: ignore[import]
         from mlx_vlm import stream_generate  # type: ignore[import]
+        from mlx_vlm.tokenizer_utils import load_tokenizer as load_detokenizer  # type: ignore[import]
+        from mlx_vlm.utils import StoppingCriteria  # type: ignore[import]
+        from mlx_vlm.utils import get_model_path, load_model  # type: ignore[import]
         from transformers import AutoTokenizer
 
         model_path = get_model_path(self.settings.mlx_model)
@@ -66,10 +62,8 @@ class BrainService:
         model = load_model(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-        # Attach the detokenizer and stopping criteria that stream_generate expects
-        detokenizer_class = _load_det(model_path, return_tokenizer=False)
+        detokenizer_class = load_detokenizer(model_path, return_tokenizer=False)
         tokenizer.detokenizer = detokenizer_class(tokenizer)
-        # Prefer tokenizer's eos_token_id; model.config may be None for new architectures
         eos_ids = getattr(model.config, "eos_token_id", None) or tokenizer.eos_token_id
         if isinstance(eos_ids, int):
             eos_ids = [eos_ids]
@@ -77,55 +71,21 @@ class BrainService:
 
         self._vlm_model = model
         self._tokenizer = tokenizer
-        self._vlm_processor = tokenizer  # stream_generate uses processor directly for text
+        self._vlm_processor = tokenizer
         self._vlm_stream = stream_generate
-
-        self._mlx_draft_model = None  # speculative decoding not supported in mlx_vlm
 
         print("  Warming up (compiling MLX graphs)…", flush=True)
         warmup = self._apply_chat_template(self._build_messages("Hello"))
-        for _ in self._vlm_stream(self._vlm_model, self._vlm_processor,
-                                   prompt=warmup, max_tokens=5):
+        for _ in self._vlm_stream(
+            self._vlm_model,
+            self._vlm_processor,
+            prompt=warmup,
+            max_tokens=5,
+        ):
             pass
         print("  Ready.\n", flush=True)
 
-    def _stream_sentences_mlx_vlm(self, user_input: str) -> Iterator[str]:
-        prompt = self._apply_chat_template(self._build_messages(user_input))
-        buffer = ""
-        total_tokens = 0
-        pure_gen_s = 0.0
-        gen_iter = iter(self._vlm_stream(
-            self._vlm_model,
-            self._vlm_processor,
-            prompt=prompt,
-            max_tokens=self.settings.mlx_max_tokens,
-            temperature=self.settings.temperature,
-        ))
-        while True:
-            t_tok = time.perf_counter()
-            try:
-                chunk = next(gen_iter)
-            except StopIteration:
-                break
-            pure_gen_s += time.perf_counter() - t_tok
-            text: str = chunk.text if hasattr(chunk, "text") else str(chunk)
-            total_tokens = getattr(chunk, "generation_tokens", total_tokens + 1)
-            buffer += text
-            parts = _SENTENCE_END.split(buffer)
-            for sentence in parts[:-1]:
-                if sentence.strip():
-                    yield sentence.strip()
-            buffer = parts[-1]
-        if buffer.strip():
-            yield buffer.strip()
-        self.last_stats = {
-            "backend": "mlx_vlm",
-            "tokens": total_tokens,
-            "gen_seconds": pure_gen_s,
-            "tok_per_sec": total_tokens / pure_gen_s if pure_gen_s > 0 else 0,
-        }
-
-    # ── MLX-LM (text-only models — Qwen3, Qwen2.5, Llama, etc.) ─────────────────
+    # ── MLX-LM (text-only models) ────────────────────────────────────────────────
 
     def _init_mlx(self) -> None:
         from mlx_lm import load, stream_generate  # type: ignore[import]
@@ -144,25 +104,48 @@ class BrainService:
 
         print("  Warming up (compiling MLX graphs)…", flush=True)
         warmup = self._apply_chat_template(self._build_messages("Hello"))
-        for _ in self._mlx_stream(self._mlx_model, self._tokenizer,
-                                   prompt=warmup, max_tokens=5,
-                                   draft_model=self._mlx_draft_model):
+        for _ in self._mlx_stream(
+            self._mlx_model,
+            self._tokenizer,
+            prompt=warmup,
+            max_tokens=5,
+            draft_model=self._mlx_draft_model,
+        ):
             pass
         print("  Ready.\n", flush=True)
 
+    def _stream_sentences_mlx_vlm(self, user_input: str) -> Iterator[str]:
+        prompt = self._apply_chat_template(self._build_messages(user_input))
+        gen_iter = iter(
+            self._vlm_stream(
+                self._vlm_model,
+                self._vlm_processor,
+                prompt=prompt,
+                max_tokens=self.settings.mlx_max_tokens,
+                temperature=self.settings.temperature,
+            )
+        )
+        yield from self._stream_chunked_sentences(gen_iter, backend="mlx_vlm")
+
     def _stream_sentences_mlx(self, user_input: str) -> Iterator[str]:
         prompt = self._apply_chat_template(self._build_messages(user_input))
+        gen_iter = iter(
+            self._mlx_stream(
+                self._mlx_model,
+                self._tokenizer,
+                prompt=prompt,
+                max_tokens=self.settings.mlx_max_tokens,
+                draft_model=self._mlx_draft_model,
+                temp=self.settings.temperature,
+            )
+        )
+        yield from self._stream_chunked_sentences(gen_iter, backend="mlx")
+
+    def _stream_chunked_sentences(self, gen_iter: Iterator[Any], *, backend: str) -> Iterator[str]:
         buffer = ""
         total_tokens = 0
         pure_gen_s = 0.0
-        gen_iter = iter(self._mlx_stream(
-            self._mlx_model,
-            self._tokenizer,
-            prompt=prompt,
-            max_tokens=self.settings.mlx_max_tokens,
-            draft_model=self._mlx_draft_model,
-            temp=self.settings.temperature,
-        ))
+
         while True:
             t_tok = time.perf_counter()
             try:
@@ -173,15 +156,18 @@ class BrainService:
             text: str = chunk.text if hasattr(chunk, "text") else str(chunk)
             total_tokens = getattr(chunk, "generation_tokens", total_tokens + 1)
             buffer += text
+
             parts = _SENTENCE_END.split(buffer)
             for sentence in parts[:-1]:
                 if sentence.strip():
                     yield sentence.strip()
             buffer = parts[-1]
+
         if buffer.strip():
             yield buffer.strip()
+
         self.last_stats = {
-            "backend": "mlx",
+            "backend": backend,
             "tokens": total_tokens,
             "gen_seconds": pure_gen_s,
             "tok_per_sec": total_tokens / pure_gen_s if pure_gen_s > 0 else 0,
@@ -215,60 +201,14 @@ class BrainService:
             {"role": "user", "content": user_input},
         ]
 
-    # ── Ollama ────────────────────────────────────────────────────────────────────
-
-    def _stream_sentences_ollama(self, user_input: str) -> Iterator[str]:
-        payload: dict[str, Any] = {
-            "model": self.settings.ollama_model,
-            "messages": self._build_messages(user_input),
-            "stream": True,
-            "options": {
-                "num_gpu": 99,        # offload all layers to Metal GPU
-                "f16_kv": True,       # fp16 KV cache — faster, lower memory
-                "temperature": self.settings.temperature,
-            },
-        }
-        url = f"{self.settings.ollama_base_url}/api/chat"
-        resp = self.session.post(url, json=payload, timeout=self.settings.ollama_timeout_seconds, stream=True)
-        resp.raise_for_status()
-
-        buffer = ""
-        final_data: dict = {}
-        for raw_line in resp.iter_lines():
-            if not raw_line:
-                continue
-            try:
-                data = json.loads(raw_line)
-            except json.JSONDecodeError:
-                continue
-            buffer += data.get("message", {}).get("content", "")
-            parts = _SENTENCE_END.split(buffer)
-            for sentence in parts[:-1]:
-                if sentence.strip():
-                    yield sentence.strip()
-            buffer = parts[-1]
-            if data.get("done"):
-                final_data = data
-                break
-        if buffer.strip():
-            yield buffer.strip()
-        gen_tokens = final_data.get("eval_count", 0)
-        gen_ns = final_data.get("eval_duration", 0)
-        self.last_stats = {
-            "backend": "ollama",
-            "tokens": gen_tokens,
-            "gen_seconds": gen_ns / 1e9 if gen_ns else 0,
-            "tok_per_sec": (gen_tokens / (gen_ns / 1e9)) if gen_ns else 0,
-        }
-
     # ── Dispatch ──────────────────────────────────────────────────────────────────
 
     def _stream_sentences(self, user_input: str) -> Iterator[str]:
-        if self.settings.llm_backend == "mlx_vlm":
+        if self._backend == "mlx_vlm":
             return self._stream_sentences_mlx_vlm(user_input)
-        if self.settings.llm_backend == "mlx":
+        if self._backend == "mlx":
             return self._stream_sentences_mlx(user_input)
-        return self._stream_sentences_ollama(user_input)
+        raise RuntimeError(f"Unsupported LLM backend: {self._backend}")
 
     def think_stream(self, user_input: str) -> Iterator[str]:
         """Stream LLM response sentence by sentence. Persists exchange when done."""
