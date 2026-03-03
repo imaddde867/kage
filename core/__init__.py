@@ -1,3 +1,3 @@
 """Core modules for the local assistant runtime."""
 
-__all__ = ["brain", "listener", "memory", "speaker"]
+__all__ = ["audio_coordinator", "brain", "listener", "memory", "speaker"]

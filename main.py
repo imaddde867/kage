@@ -8,29 +8,95 @@ from __future__ import annotations
 
 import argparse
 import logging
+import threading
 import time
 
+import numpy as np
+import sounddevice as sd
+
 import config
+from core.audio_coordinator import AudioCoordinator, AudioState
 from core.brain import BrainService
 from core.listener import ListenerService
-from core.speaker import speak
+from core.speaker import speak, stop_speaking
 
 logging.basicConfig(level=logging.ERROR, format="[%(levelname)s] %(name)s: %(message)s")
 
 
-def respond(brain: BrainService, user_text: str, timing: bool = False) -> None:
+def _monitor_barge_in(
+    listener: ListenerService,
+    coordinator: AudioCoordinator,
+    stop_event: threading.Event,
+) -> None:
+    chunk = listener.settings.wake_word_chunk_size
+    listener.reset_interrupt_detector()
+    try:
+        with sd.InputStream(
+            samplerate=listener.settings.sample_rate,
+            channels=1,
+            dtype="int16",
+            blocksize=chunk,
+        ) as stream:
+            while not stop_event.is_set():
+                audio, _ = stream.read(chunk)
+                flat = np.asarray(audio, dtype=np.int16).reshape(-1)
+                if listener.detect_interrupt(flat):
+                    if coordinator.request_interrupt():
+                        stop_speaking()
+                    stop_event.set()
+                    return
+    except Exception:
+        logging.exception("Barge-in monitor error")
+
+
+def respond(
+    brain: BrainService,
+    user_text: str,
+    timing: bool = False,
+    *,
+    listener: ListenerService | None = None,
+    coordinator: AudioCoordinator | None = None,
+) -> bool:
     print("\n[Kage]: ", end="", flush=True)
     t0 = time.perf_counter()
     t_first_sentence: float | None = None
     tts_total = 0.0
+    interrupted = False
 
-    for sentence in brain.think_stream(user_text):
-        if t_first_sentence is None:
-            t_first_sentence = time.perf_counter()
-        print(sentence, end=" ", flush=True)
-        t_speak = time.perf_counter()
-        speak(sentence)
-        tts_total += time.perf_counter() - t_speak
+    stream = brain.think_stream(user_text)
+    try:
+        for sentence in stream:
+            if t_first_sentence is None:
+                t_first_sentence = time.perf_counter()
+            print(sentence, end=" ", flush=True)
+
+            if listener is not None and coordinator is not None and coordinator.allow_barge_in:
+                coordinator.begin_speaking()
+                monitor_stop = threading.Event()
+                monitor_thread = threading.Thread(
+                    target=_monitor_barge_in,
+                    args=(listener, coordinator, monitor_stop),
+                    daemon=True,
+                )
+                monitor_thread.start()
+                t_speak = time.perf_counter()
+                result = speak(sentence, cancel_token=coordinator.cancel_token)
+                tts_total += time.perf_counter() - t_speak
+                monitor_stop.set()
+                monitor_thread.join(timeout=0.3)
+                coordinator.end_speaking(interrupted=result.interrupted)
+
+                if result.interrupted:
+                    interrupted = True
+                    break
+            else:
+                t_speak = time.perf_counter()
+                speak(sentence)
+                tts_total += time.perf_counter() - t_speak
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
 
     t_end = time.perf_counter()
     print("\n")
@@ -50,26 +116,51 @@ def respond(brain: BrainService, user_text: str, timing: bool = False) -> None:
             flush=True,
         )
 
+    return interrupted
+
 
 def run_voice(settings: config.Settings, timing: bool = False) -> None:
     listener = ListenerService(settings=settings)
     listener.load_models()
     brain = BrainService(settings=settings)
+    coordinator = AudioCoordinator(settings=settings)
 
     print(f"  Kage online. Say '{settings.wake_word.title()}' to activate.\n")
 
     while True:
         try:
+            coordinator.transition(AudioState.IDLE)
             listener.wait_for_wake_word()
             speak("Yeah?")
-            audio = listener.record_until_silence()
-            user_text = listener.transcribe(audio)
-            if not user_text:
-                speak("Didn't catch that.")
-                continue
-            print(f"[You]: {user_text}")
-            respond(brain, user_text, timing=timing)
-            time.sleep(0.6)
+            coordinator.end_speaking()
+
+            while True:
+                coordinator.transition(AudioState.LISTENING)
+                coordinator.wait_for_listen_window()
+                audio = listener.record_until_silence()
+                user_text = listener.transcribe(audio)
+                if not user_text:
+                    coordinator.transition(AudioState.IDLE)
+                    speak("Didn't catch that.")
+                    coordinator.end_speaking()
+                    break
+
+                print(f"[You]: {user_text}")
+                coordinator.transition(AudioState.THINKING)
+                interrupted = respond(
+                    brain,
+                    user_text,
+                    timing=timing,
+                    listener=listener,
+                    coordinator=coordinator,
+                )
+                if interrupted:
+                    print("[Kage] Listening...")
+                    continue
+
+                coordinator.transition(AudioState.IDLE)
+                time.sleep(0.6)
+                break
         except KeyboardInterrupt:
             print("\n[Kage] Going offline.")
             return
