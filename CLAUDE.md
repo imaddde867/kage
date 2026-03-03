@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What Is Kage
 
-Kage is a fully local, always-on personal AI for macOS. The voice loop is: wake word (`hey_jarvis` via openwakeword) → STT (macOS native or faster-whisper) → LLM (Ollama) → TTS (macOS `say`). Memory persists across sessions in SQLite (`data/memory/kage_memory.db`).
+Kage is a fully local, always-on personal AI for macOS. The voice loop is: wake word (`hey_jarvis` via openwakeword) → STT (macOS native or faster-whisper) → LLM (Ollama/MLX) → TTS (Kokoro-82M via `mlx-audio`). Memory persists across sessions in SQLite (`data/memory/kage_memory.db`).
 
 ## Commands
 
@@ -48,14 +48,17 @@ Text loop:  input() → think_stream() → print + speak()
 
 **`core/listener.py`** — `ListenerService` handles wake-word detection (openwakeword) and recording + transcription. STT backend is `apple` (macOS native via `SpeechRecognition`) by default; falls back to `faster-whisper` on failure or if `STT_BACKEND=whisper`.
 
-**`core/speaker.py`** — Single `speak(text)` function using `subprocess.run(["say", "-v", voice, text])`. No class, no session management.
+**`core/speaker.py`** — Single `speak(text)` function using Kokoro-82M via `mlx-audio` (lazy-loaded model, local playback).
 
 ## Key Configuration
 
 All settings via `.env` (see `.env.example`):
 - `OLLAMA_MODEL` — default `qwen3.5:9b`
 - `STT_BACKEND` — `apple` (default) or `whisper`
-- `MACOS_SAY_VOICE` — default `Ava (Enhanced)`; list options with `say -v '?'`
+- `KOKORO_MODEL` — default `mlx-community/Kokoro-82M-bf16`
+- `KOKORO_VOICE` — default `af_heart` (e.g. `bf_emma`, `bm_george`)
+- `KOKORO_LANG_CODE` — default `en-us` (`en-gb`, `ja`, `zh` also supported)
+- `KOKORO_SPEED` — default `1.0`
 - `WAKE_WORD_MODEL` — openwakeword model name (no extension), default `hey_jarvis`
 - `MEMORY_DIR` — default `./data/memory`, supports `~`
 
