@@ -36,14 +36,20 @@ No build step, no linter config. If adding a linter, use `ruff` + `black`.
 
 ```
 Voice loop: wait_for_wake_word() → record_until_silence() → transcribe() → think_stream() → speak()
-Text loop:  input() → think_stream() → print + speak()
+Text loop:  input() → think_text_stream() → print (optional speak)
 ```
 
 **`config.py`** — frozen `Settings` dataclass, loaded once via `config.get()` (lru_cache). All env vars are read here. Add new settings here only.
 
-**`core/brain.py`** — `BrainService.think_stream(user_input)` builds the MLX prompt (system prompt + memory recall), streams token-by-token, and yields complete sentences. Persists the exchange to memory when done. It's a generator — callers iterate over sentences.
+**`core/brain.py`** — thin orchestration layer. It coordinates deterministic guardrails, prompt assembly, streaming strategy (`think_stream` vs `think_text_stream`), and memory persistence.
 
-**`core/memory.py`** — `MemoryStore` wraps SQLite with one table: `conversations`. `recall(query)` does keyword matching over recent rows. DB path respects `~` expansion via `MEMORY_DIR`.
+**`core/brain_generation.py`** — model loading and backend-specific raw streaming (`mlx_vlm` / `mlx`) with performance stats.
+
+**`core/brain_guardrails.py`** — deterministic conflict/safety handling and policy-note derivation.
+
+**`core/brain_prompting.py`** — system prompt templates, recent-turn assembly, and chat-template application.
+
+**`core/memory.py`** — `MemoryStore` wraps SQLite with one table: `conversations`. `recall(query)` uses bounded token-overlap scoring with dedupe/recency weighting. DB path respects `~` expansion via `MEMORY_DIR`.
 
 **`core/listener.py`** — `ListenerService` handles wake-word detection (openwakeword) and recording + transcription. STT backend is `apple` (macOS native via `SpeechRecognition`) by default; falls back to `faster-whisper` on failure or if `STT_BACKEND=whisper`.
 
