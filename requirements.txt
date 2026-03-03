@@ -14,7 +14,9 @@ soundfile
 # Wake word detection
 openwakeword
 
-# TTS (neural, local, CPU-only, ~25MB model — optional, macos_say is default)
+# TTS — AVFoundation (gap-free streaming, native macOS)
+pyobjc-framework-AVFoundation
+# TTS (neural, local, CPU-only, ~25MB model — optional)
 kittentts
 
 # Utilities
