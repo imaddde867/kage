@@ -41,6 +41,10 @@ class MemoryStore:
                 )
                 """
             )
+            # Migrate existing DBs that used the old 'jarvis_response' column name.
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+            if "jarvis_response" in columns and "kage_response" not in columns:
+                conn.execute("ALTER TABLE conversations RENAME COLUMN jarvis_response TO kage_response")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS facts (

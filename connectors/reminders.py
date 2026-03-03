@@ -11,6 +11,7 @@ def get_context() -> str:
     Returns a formatted string for LLM context injection.
     """
     script = f"""
+    if application "Reminders" is not running then return ""
     set output to ""
     set itemCount to 0
     tell application "Reminders"
