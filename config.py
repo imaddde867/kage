@@ -63,6 +63,7 @@ class Settings:
     wake_word: str
     wake_word_model: str
     wake_word_threshold: float
+    stt_backend: str
     whisper_model: str
 
     # TTS
@@ -92,19 +93,20 @@ class Settings:
 def get_settings() -> Settings:
     return Settings(
         ollama_base_url=_env_str("OLLAMA_BASE_URL", "http://localhost:11434"),
-        ollama_model=_env_str("OLLAMA_MODEL", "qwen3:8b"),
+        ollama_model=_env_str("OLLAMA_MODEL", "qwen3.5:9b"),
         ollama_timeout_seconds=_env_int("OLLAMA_TIMEOUT_SECONDS", 60),
         ollama_think=_env_bool("OLLAMA_THINK", False),
         wake_word=_env_str("WAKE_WORD", "hey jarvis"),
         wake_word_model=_env_str("WAKE_WORD_MODEL", "hey_jarvis"),
         wake_word_threshold=_env_float("WAKE_WORD_THRESHOLD", 0.5),
+        stt_backend=_env_str("STT_BACKEND", "apple"),
         whisper_model=_env_str("WHISPER_MODEL", "base"),
-        tts_backend=_env_str("TTS_BACKEND", "kittentts"),
+        tts_backend=_env_str("TTS_BACKEND", "macos_say"),
         tts_voice=_env_str("TTS_VOICE", "Jasper"),
         kittentts_profile=_env_str("KITTENTTS_PROFILE", "nano"),
         kittentts_model=_env_str("KITTENTTS_MODEL", ""),
         kittentts_sample_rate=_env_int("KITTENTTS_SAMPLE_RATE", 24000),
-        say_fallback_voice=_env_str("MACOS_SAY_VOICE", _env_str("SAY_FALLBACK_VOICE", "Daniel")),
+        say_fallback_voice=_env_str("MACOS_SAY_VOICE", _env_str("SAY_FALLBACK_VOICE", "Ava (Enhanced)")),
         memory_dir=_env_str("MEMORY_DIR", "./data/memory"),
         user_name=_env_str("USER_NAME", "Imad"),
         sample_rate=_env_int("SAMPLE_RATE", 16000),
