@@ -35,7 +35,9 @@ _PLANNING_RE = re.compile(
     re.IGNORECASE,
 )
 _RECALL_RE = re.compile(
-    r"\b(do you remember|what did i tell you|did i mention|have i told you)\b",
+    r"\b(do you remember|what did i tell you|did i mention|have i told you"
+    r"|what do you know about me|what have you learned about me"
+    r"|what do you know about my|what(?:'s| is) in my memory)\b",
     re.IGNORECASE,
 )
 _PROFILE_RE = re.compile(

@@ -35,6 +35,11 @@ class IntentRouterTests(unittest.TestCase):
         self.assertTrue(route.proactive_ok)
         self.assertTrue(route.inject_entities)
 
+    def test_classify_what_do_you_know_is_recall(self) -> None:
+        route = self.router.classify("What do you know about me?")
+        self.assertEqual(route.intent, "RECALL_REQUEST")
+        self.assertTrue(route.inject_entities)
+
     def test_classify_runs_under_1ms(self) -> None:
         iterations = 100
         t0 = time.perf_counter()

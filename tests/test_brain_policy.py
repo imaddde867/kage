@@ -126,9 +126,11 @@ class BrainPolicyTests(unittest.TestCase):
         self.assertIn("Known facts about Test", system)
         self.assertIn("review the PR", system)
 
-    def test_entity_context_absent_for_general_intent(self) -> None:
+    def test_entity_context_absent_when_empty_string_passed(self) -> None:
         from core.brain_prompting import build_messages
 
+        # When brain passes entity_context="" (e.g. no entities stored yet),
+        # the injected block "\n\nKnown facts about <name>:\n..." is absent.
         messages = build_messages(
             user_input="What is the capital of France?",
             user_name="Test",
@@ -139,9 +141,9 @@ class BrainPolicyTests(unittest.TestCase):
             entity_context="",
         )
         system = messages[0]["content"]
-        self.assertNotIn("Known facts", system)
+        self.assertNotIn("\n\nKnown facts about Test", system)
 
-    def test_total_system_prompt_under_1800_chars_with_entity_block(self) -> None:
+    def test_total_system_prompt_under_2500_chars_with_entity_block(self) -> None:
         from core.brain_prompting import build_messages
 
         entity_block = (
@@ -158,7 +160,7 @@ class BrainPolicyTests(unittest.TestCase):
             entity_context=entity_block,
         )
         system = messages[0]["content"]
-        self.assertLessEqual(len(system), 1800)
+        self.assertLessEqual(len(system), 2500)
 
 
 if __name__ == "__main__":

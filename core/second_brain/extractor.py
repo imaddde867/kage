@@ -26,18 +26,34 @@ _DATE_CLAUSE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Profile: allow optional adverb between subject and verb (e.g. "I actually live in")
 _PROFILE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"i(?:'m| am)? (?:live|living|based|located) in\s+(.+)", re.IGNORECASE), "location"),
-    (re.compile(r"i(?:'m| am)? from\s+(.+)", re.IGNORECASE), "location"),
+    (
+        re.compile(
+            r"i(?:'m| am)?(?:\s+(?:actually|currently|now|really))?\s+(?:live|living|based|located) in\s+(.+)",
+            re.IGNORECASE,
+        ),
+        "location",
+    ),
+    (
+        re.compile(
+            r"i(?:'m| am)?(?:\s+(?:actually|currently|now|originally))?\s+from\s+(.+)",
+            re.IGNORECASE,
+        ),
+        "location",
+    ),
     (re.compile(r"my timezone is\s+(.+)", re.IGNORECASE), "timezone"),
 ]
 
-_TASK_TRIGGERS: list[re.Pattern[str]] = [
+# Strong task triggers — unambiguously imperative, safe even when text has "?"
+_TASK_TRIGGERS_STRONG: list[re.Pattern[str]] = [
     re.compile(r"remind me to\s+(.+)", re.IGNORECASE),
     re.compile(r"add a task[:\s]+(.+)", re.IGNORECASE),
     re.compile(r"to-?do[:\s]+(.+)", re.IGNORECASE),
-    re.compile(r"i need to\s+(.+)", re.IGNORECASE),
 ]
+
+# Weak task trigger — "I need to" is ambiguous in information-seeking questions
+_TASK_TRIGGER_WEAK = re.compile(r"i need to\s+(.+)", re.IGNORECASE)
 
 _COMMITMENT_TRIGGERS: list[re.Pattern[str]] = [
     re.compile(
@@ -105,9 +121,21 @@ class ExtractedEntity:
     due_date: Optional[str] = None
 
 
+def _extract_task_from_match(m: re.Match[str], full_text: str) -> Optional[ExtractedEntity]:
+    raw = m.group(1).strip()
+    description, due_date = _split_description_and_date(raw)
+    if due_date is None:
+        due_date = _parse_date(full_text)
+    if not description:
+        return None
+    key = description[:60].lower().replace(" ", "_")
+    return ExtractedEntity(kind="task", key=key, value=description, due_date=due_date)
+
+
 class EntityExtractor:
     def extract(self, text: str) -> list[ExtractedEntity]:
         results: list[ExtractedEntity] = []
+        is_question = "?" in text
 
         # Profile (checked first — high specificity)
         for pattern, profile_key in _PROFILE_PATTERNS:
@@ -117,22 +145,23 @@ class EntityExtractor:
                 results.append(ExtractedEntity(kind="profile", key=profile_key, value=value))
                 break
 
-        # Tasks
-        for trigger in _TASK_TRIGGERS:
+        # Tasks — strong triggers always apply; weak trigger skipped for questions
+        found_task = False
+        for trigger in _TASK_TRIGGERS_STRONG:
             m = trigger.search(text)
             if m:
-                raw = m.group(1).strip()
-                description, due_date = _split_description_and_date(raw)
-                # Fall back to scanning full text for date if none found in description
-                if due_date is None:
-                    due_date = _parse_date(text)
-                if not description:
-                    break
-                key = description[:60].lower().replace(" ", "_")
-                results.append(
-                    ExtractedEntity(kind="task", key=key, value=description, due_date=due_date)
-                )
+                entity = _extract_task_from_match(m, text)
+                if entity:
+                    results.append(entity)
+                found_task = True
                 break
+
+        if not found_task and not is_question:
+            m = _TASK_TRIGGER_WEAK.search(text)
+            if m:
+                entity = _extract_task_from_match(m, text)
+                if entity:
+                    results.append(entity)
 
         # Commitments
         for trigger in _COMMITMENT_TRIGGERS:
