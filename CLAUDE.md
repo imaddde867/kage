@@ -41,7 +41,7 @@ No build step, no linter config committed. If adding a linter, use `ruff` + `bla
 - **`core/memory.py`** — `MemoryStore` wraps a SQLite DB with two tables: `conversations` and `facts`. Recall is keyword-based (no embeddings yet). The DB path respects `~` expansion via `MEMORY_DIR`.
 - **`core/listener.py`** — `ListenerService` handles wake-word detection (openwakeword) and speech recording + transcription. STT backend is `apple` (macOS native, hardware-accelerated) by default, with `whisper` (faster-whisper) as fallback. Set via `STT_BACKEND` env var.
 - **`core/speaker.py`** — `SpeakerService` supports two backends: `macos_say` (default, macOS `say` with neural voices) and `kittentts` (local neural TTS). Falls back to `macos_say` automatically if KittenTTS fails. Set via `TTS_BACKEND` env var.
-- **`connectors/`** — Each connector (`calendar.py`, `reminders.py`, `notes.py`) exposes `get_context() -> str` using AppleScript. `ConnectorManager` aggregates them and silently skips failures.
+- **`connectors/`** — Each connector (`calendar.py`, `reminders.py`, `notes.py`, `things.py`) exposes `get_context() -> str` using AppleScript. `ConnectorManager` aggregates them and silently skips failures.
 
 ## Key Configuration
 
