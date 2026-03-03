@@ -81,6 +81,7 @@ def build_messages(
     memory: MemoryLike,
     recent_turns: list[tuple[str, str]],
     policy_note: str,
+    entity_context: str = "",
 ) -> list[dict[str, str]]:
     system = build_system_prompt(user_name, text_mode=text_mode)
     if policy_note:
@@ -89,6 +90,9 @@ def build_messages(
     memory_ctx = memory.recall(user_input)
     if memory_ctx:
         system += f"\n\nMemory:\n{memory_ctx}"
+
+    if entity_context:
+        system += f"\n\nKnown facts about {user_name}:\n{entity_context}"
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system}]
     for user_text, reply_text in recent_turns:
