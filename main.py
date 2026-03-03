@@ -18,15 +18,40 @@ from core.speaker import speak
 logging.basicConfig(level=logging.ERROR, format="[%(levelname)s] %(name)s: %(message)s")
 
 
-def respond(brain: BrainService, user_text: str) -> None:
+def respond(brain: BrainService, user_text: str, timing: bool = False) -> None:
     print("\n[Kage]: ", end="", flush=True)
+    t0 = time.perf_counter()
+    t_first_sentence: float | None = None
+    tts_total = 0.0
+
     for sentence in brain.think_stream(user_text):
+        if t_first_sentence is None:
+            t_first_sentence = time.perf_counter()
         print(sentence, end=" ", flush=True)
+        t_speak = time.perf_counter()
         speak(sentence)
+        tts_total += time.perf_counter() - t_speak
+
+    t_end = time.perf_counter()
     print("\n")
 
+    if timing:
+        ttfs = (t_first_sentence - t0) if t_first_sentence else 0.0
+        stats = brain.last_stats
+        tok = stats.get("tokens", "?")
+        tps = stats.get("tok_per_sec", 0.0)
+        backend = stats.get("backend", "?")
+        tps_str = f"{tps:.1f} tok/s" if tps else "?"
+        print(
+            f"  ⏱  [{backend}] first sentence: {ttfs:.2f}s | "
+            f"gen: {tok} tok @ {tps_str} | "
+            f"tts: {tts_total:.2f}s | "
+            f"total: {t_end - t0:.2f}s",
+            flush=True,
+        )
 
-def run_voice(settings: config.Settings) -> None:
+
+def run_voice(settings: config.Settings, timing: bool = False) -> None:
     listener = ListenerService(settings=settings)
     listener.load_models()
     brain = BrainService(settings=settings)
@@ -43,7 +68,7 @@ def run_voice(settings: config.Settings) -> None:
                 speak("Didn't catch that.")
                 continue
             print(f"[You]: {user_text}")
-            respond(brain, user_text)
+            respond(brain, user_text, timing=timing)
             time.sleep(0.6)
         except KeyboardInterrupt:
             print("\n[Kage] Going offline.")
@@ -53,7 +78,7 @@ def run_voice(settings: config.Settings) -> None:
             time.sleep(1)
 
 
-def run_text(settings: config.Settings) -> None:
+def run_text(settings: config.Settings, timing: bool = False) -> None:
     brain = BrainService(settings=settings)
     print("  Kage online. Type your message. 'exit' to quit.\n")
 
@@ -70,22 +95,93 @@ def run_text(settings: config.Settings) -> None:
             return
 
         try:
-            respond(brain, user_text)
+            respond(brain, user_text, timing=timing)
         except KeyboardInterrupt:
             print("\n[Kage] Going offline.")
             return
 
 
+_BENCH_PROMPTS = [
+    "What is 15% of 340?",
+    "Name the capital of Japan.",
+    "Give me one sentence about why the sky is blue.",
+]
+
+
+def run_bench(settings: config.Settings) -> None:
+    """Pure inference benchmark — no TTS, no memory, prints accurate tok/s."""
+    print(f"  Backend    : {settings.llm_backend}")
+    print(f"  Model      : {settings.ollama_model if settings.llm_backend == 'ollama' else settings.mlx_model}")
+    if settings.llm_backend == "mlx" and settings.mlx_draft_model:
+        print(f"  Draft      : {settings.mlx_draft_model}  (speculative decoding)")
+
+    # BrainService.__init__ loads + warms up the model (prints its own status lines)
+    brain = BrainService(settings=settings)
+
+    if settings.llm_backend in {"mlx", "mlx_vlm"}:
+        import mlx.core as mx
+        print(f"  MLX device : {mx.default_device()}")
+        try:
+            active_gb = mx.get_active_memory() / 1e9
+            print(f"  MLX memory : {active_gb:.2f} GB active")
+        except Exception:
+            pass
+    print()
+
+    results = []
+    for i, prompt in enumerate(_BENCH_PROMPTS, 1):
+        t0 = time.perf_counter()
+        t_first: float | None = None
+        tokens_out: list[str] = []
+
+        for sentence in brain.think_stream(prompt):
+            if t_first is None:
+                t_first = time.perf_counter()
+            tokens_out.append(sentence)
+            # no speak() — pure inference measurement
+
+        stats = brain.last_stats
+        ttft = (t_first - t0) if t_first else 0.0
+        tps = stats.get("tok_per_sec", 0.0)
+        tok = stats.get("tokens", "?")
+        results.append(tps)
+
+        response_preview = " ".join(tokens_out)[:72]
+        print(f"  [{i}] {prompt}")
+        print(f"       → {response_preview}")
+        print(f"       TTFT: {ttft:.2f}s | {tok} tok @ {tps:.1f} tok/s\n")
+
+    if results:
+        avg = sum(results) / len(results)
+        print(f"  avg throughput : {avg:.1f} tok/s")
+        model_name = settings.mlx_model.split("/")[-1]
+        if "1.5B" in model_name or "1.5b" in model_name:
+            expected = "~40–60 tok/s"
+        elif "3B" in model_name or "3b" in model_name:
+            expected = "~20–35 tok/s"
+        else:
+            expected = "~8–15 tok/s"
+        print(f"  expected (M4)  : {expected} for {model_name}\n")
+
+    print("  To confirm Neural Engine is active, run in a separate terminal while bench runs:")
+    print("    sudo powermetrics --samplers cpu_power,gpu_power,ane_power -i 500 -n 8\n")
+    print("  ANE Power > 0 mW during inference = Neural Engine in use.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Kage — local personal AI")
     parser.add_argument("--text", action="store_true", help="Text mode instead of voice")
+    parser.add_argument("--timing", action="store_true", help="Print latency breakdown after each response")
+    parser.add_argument("--bench", action="store_true", help="Run inference benchmark without TTS and exit")
     args = parser.parse_args()
 
     settings = config.get()
-    if args.text:
-        run_text(settings)
+    if args.bench:
+        run_bench(settings)
+    elif args.text:
+        run_text(settings, timing=args.timing)
     else:
-        run_voice(settings)
+        run_voice(settings, timing=args.timing)
 
 
 if __name__ == "__main__":
