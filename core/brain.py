@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
 from collections import deque
 from collections.abc import Iterator
 from typing import Any
@@ -31,6 +33,18 @@ class BrainService:
 
         self._runtime = GenerationRuntime(settings=self.settings)
         self.last_stats = self._runtime.last_stats
+
+        if getattr(self.settings, "second_brain_enabled", True):
+            from core.second_brain.entity_store import EntityStore
+            from core.second_brain.extractor import EntityExtractor
+            from core.second_brain.planner import IntentRouter
+            from core.second_brain.proactive import ProactiveEngine
+
+            self._entity_store = EntityStore(self.memory.db_path)
+            self._extractor = EntityExtractor()
+            self._router = IntentRouter()
+            self._proactive = ProactiveEngine(self._entity_store, self.settings)
+
         self._warmup()
 
     def _warmup(self) -> None:
@@ -47,11 +61,28 @@ class BrainService:
             limit=max(0, self.settings.recent_turns),
         )
 
-    def _build_messages(self, user_input: str, *, text_mode: bool) -> list[dict[str, str]]:
+    def _build_messages(
+        self,
+        user_input: str,
+        *,
+        text_mode: bool,
+        route: Any = None,
+    ) -> list[dict[str, str]]:
         recent_turns = self._collect_recent_turns()
         user_messages = [user_text for user_text, _ in recent_turns if user_text]
         user_messages.append(user_input)
         policy_note = _derive_policy_note(user_messages)
+
+        entity_context = ""
+        if (
+            route is not None
+            and route.inject_entities
+            and hasattr(self, "_entity_store")
+        ):
+            entity_context = self._entity_store.recall_for_prompt(
+                char_budget=getattr(self.settings, "entity_recall_budget", 400)
+            )
+
         return build_messages(
             user_input=user_input,
             user_name=self.settings.user_name,
@@ -59,10 +90,14 @@ class BrainService:
             memory=self.memory,
             recent_turns=recent_turns,
             policy_note=policy_note,
+            entity_context=entity_context,
         )
 
-    def _build_prompt(self, user_input: str, *, text_mode: bool) -> str:
-        return apply_chat_template(self._runtime.tokenizer, self._build_messages(user_input, text_mode=text_mode))
+    def _build_prompt(self, user_input: str, *, text_mode: bool, route: Any = None) -> str:
+        return apply_chat_template(
+            self._runtime.tokenizer,
+            self._build_messages(user_input, text_mode=text_mode, route=route),
+        )
 
     def _update_policy_state(self, user_input: str) -> None:
         self._prefers_honesty, self._prefers_forced_yes = update_policy_state(
@@ -78,8 +113,8 @@ class BrainService:
             prefers_forced_yes=self._prefers_forced_yes,
         )
 
-    def _stream_sentences(self, user_input: str) -> Iterator[str]:
-        prompt = self._build_prompt(user_input, text_mode=False)
+    def _stream_sentences(self, user_input: str, *, route: Any = None) -> Iterator[str]:
+        prompt = self._build_prompt(user_input, text_mode=False, route=route)
         buffer = ""
         for text in self._runtime.stream_raw(prompt):
             buffer += text
@@ -92,19 +127,52 @@ class BrainService:
         if buffer.strip():
             yield buffer.strip()
 
-    def _stream_text(self, user_input: str) -> Iterator[str]:
-        prompt = self._build_prompt(user_input, text_mode=True)
+    def _stream_text(self, user_input: str, *, route: Any = None) -> Iterator[str]:
+        prompt = self._build_prompt(user_input, text_mode=True, route=route)
         yield from self._runtime.stream_raw(prompt)
 
-    def _persist_exchange(self, user_input: str, reply: str) -> None:
+    def _extract_and_store(self, user_input: str, exchange_id: str) -> None:
+        t0 = time.perf_counter()
+        try:
+            entities = self._extractor.extract(user_input)
+            for entity in entities:
+                self._entity_store.upsert(
+                    entity.kind,
+                    entity.key,
+                    entity.value,
+                    due_date=entity.due_date,
+                    source_id=exchange_id,
+                )
+        except Exception:
+            logger.exception("Entity extraction failed")
+        finally:
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            logger.debug("Entity extraction completed in %.0fms", elapsed_ms)
+
+    def _persist_exchange(self, user_input: str, reply: str, *, route: Any = None) -> None:
         if not reply:
             return
         if self.settings.recent_turns > 0:
             self._recent_turns.append((user_input, reply))
         try:
-            self.memory.store_exchange(user_input, reply)
+            exchange_id: str | None = self.memory.store_exchange(user_input, reply)
         except Exception:
             logger.exception("Failed to persist exchange")
+            exchange_id = None
+
+        should_extract = (
+            exchange_id is not None
+            and route is not None
+            and route.should_extract
+            and getattr(self.settings, "extraction_enabled", True)
+            and hasattr(self, "_extractor")
+        )
+        if should_extract:
+            threading.Thread(
+                target=self._extract_and_store,
+                args=(user_input, exchange_id),
+                daemon=True,
+            ).start()
 
     def think_stream(self, user_input: str) -> Iterator[str]:
         self._update_policy_state(user_input)
@@ -116,11 +184,20 @@ class BrainService:
                 self._persist_exchange(user_input, reply)
             return
 
+        route = self._router.classify(user_input) if hasattr(self, "_router") else None
+
         parts: list[str] = []
-        for sentence in self._stream_sentences(user_input):
+        for sentence in self._stream_sentences(user_input, route=route):
             parts.append(sentence)
             yield sentence
-        self._persist_exchange(user_input, " ".join(parts).strip())
+
+        reply = " ".join(parts).strip()
+        self._persist_exchange(user_input, reply, route=route)
+
+        if route is not None and route.proactive_ok and hasattr(self, "_proactive"):
+            suggestion = self._proactive.suggest(reply, proactive_ok=route.proactive_ok)
+            if suggestion:
+                yield suggestion
 
     def think_text_stream(self, user_input: str) -> Iterator[str]:
         self._update_policy_state(user_input)
@@ -132,9 +209,17 @@ class BrainService:
                 self._persist_exchange(user_input, reply)
             return
 
+        route = self._router.classify(user_input) if hasattr(self, "_router") else None
+
         parts: list[str] = []
-        for chunk in self._stream_text(user_input):
+        for chunk in self._stream_text(user_input, route=route):
             parts.append(chunk)
             yield chunk
-        self._persist_exchange(user_input, "".join(parts).strip())
 
+        reply = "".join(parts).strip()
+        self._persist_exchange(user_input, reply, route=route)
+
+        if route is not None and route.proactive_ok and hasattr(self, "_proactive"):
+            suggestion = self._proactive.suggest(reply, proactive_ok=route.proactive_ok)
+            if suggestion:
+                yield suggestion

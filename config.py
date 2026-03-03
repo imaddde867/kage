@@ -115,6 +115,12 @@ class Settings:
     # Text mode UX
     text_mode_tts_enabled: bool
 
+    # Second Brain
+    second_brain_enabled: bool
+    entity_recall_budget: int
+    proactive_debounce_seconds: int
+    extraction_enabled: bool
+
 
 @lru_cache(maxsize=1)
 def get() -> Settings:
@@ -122,7 +128,7 @@ def get() -> Settings:
         llm_backend=_env_str("LLM_BACKEND", "mlx_vlm"),
         mlx_model=_env_str("MLX_MODEL", "mlx-community/Qwen3.5-4B-MLX-4bit"),
         mlx_draft_model=_env_str("MLX_DRAFT_MODEL", ""),
-        mlx_max_tokens=_env_int("MLX_MAX_TOKENS", 150),
+        mlx_max_tokens=_env_int("MLX_MAX_TOKENS", 250),
         temperature=_env_float("TEMPERATURE", 0.3),
         wake_word=_env_str("WAKE_WORD", "hey jarvis"),
         wake_word_model=_env_str("WAKE_WORD_MODEL", "hey_jarvis"),
@@ -156,4 +162,8 @@ def get() -> Settings:
             ("kage", "cage", "kaj", "kaige", "kahge", "ka-geh"),
         ),
         text_mode_tts_enabled=_env_bool("TEXT_MODE_TTS_ENABLED", False),
+        second_brain_enabled=_env_bool("SECOND_BRAIN_ENABLED", True),
+        entity_recall_budget=_env_int("ENTITY_RECALL_BUDGET", 400),
+        proactive_debounce_seconds=_env_int("PROACTIVE_DEBOUNCE_SECONDS", 60),
+        extraction_enabled=_env_bool("EXTRACTION_ENABLED", True),
     )

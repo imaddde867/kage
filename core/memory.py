@@ -96,13 +96,37 @@ class MemoryStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_conversations_timestamp ON conversations(timestamp)"
             )
+        self._init_schema_entities()
 
-    def store_exchange(self, user_input: str, assistant_response: str) -> None:
+    def _init_schema_entities(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS entities (
+                    id         TEXT PRIMARY KEY,
+                    kind       TEXT NOT NULL,
+                    key        TEXT NOT NULL,
+                    value      TEXT NOT NULL,
+                    status     TEXT DEFAULT 'active',
+                    due_date   TEXT,
+                    source_id  TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_kind ON entities(kind)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_status ON entities(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_key ON entities(kind, key)")
+
+    def store_exchange(self, user_input: str, assistant_response: str) -> str:
+        exchange_id = str(uuid.uuid4())
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO conversations (id, user_input, kage_response, timestamp) VALUES (?, ?, ?, ?)",
-                (str(uuid.uuid4()), user_input, assistant_response, datetime.now().isoformat()),
+                (exchange_id, user_input, assistant_response, datetime.now().isoformat()),
             )
+        return exchange_id
 
     def recent_turns(self, limit: int = 4, *, max_chars: int = _ENTRY_CHAR_LIMIT) -> list[tuple[str, str]]:
         if limit <= 0:
