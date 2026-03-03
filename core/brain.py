@@ -26,6 +26,10 @@ Personality:
 - Conversational: responses are spoken aloud. No bullet points, no markdown, no lists. Plain natural speech only.
 - Concise by default: 2–3 sentences maximum. If more detail is needed, give the key point and ask if they want more.
 
+Grounding rules:
+- Only state facts that are explicitly in this conversation or in Memory. Never invent, assume, or extrapolate.
+- If you don't know something, say so plainly. Do not guess.
+
 Today is {date}.
 """
 
@@ -95,6 +99,7 @@ class BrainService:
             self._vlm_processor,
             prompt=prompt,
             max_tokens=self.settings.mlx_max_tokens,
+            temperature=self.settings.temperature,
         ))
         while True:
             t_tok = time.perf_counter()
@@ -156,6 +161,7 @@ class BrainService:
             prompt=prompt,
             max_tokens=self.settings.mlx_max_tokens,
             draft_model=self._mlx_draft_model,
+            temp=self.settings.temperature,
         ))
         while True:
             t_tok = time.perf_counter()
@@ -217,8 +223,9 @@ class BrainService:
             "messages": self._build_messages(user_input),
             "stream": True,
             "options": {
-                "num_gpu": 99,   # offload all layers to Metal GPU
-                "f16_kv": True,  # fp16 KV cache — faster, lower memory
+                "num_gpu": 99,        # offload all layers to Metal GPU
+                "f16_kv": True,       # fp16 KV cache — faster, lower memory
+                "temperature": self.settings.temperature,
             },
         }
         url = f"{self.settings.ollama_base_url}/api/chat"

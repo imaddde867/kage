@@ -46,7 +46,9 @@ class Settings:
     ollama_model: str
     ollama_timeout_seconds: int
     mlx_model: str
+    mlx_draft_model: str   # empty string = disabled; same-family smaller model for speculative decoding
     mlx_max_tokens: int
+    temperature: float     # generation temperature; lower = less hallucination
 
     # Wake word
     wake_word: str
@@ -83,7 +85,9 @@ def get() -> Settings:
         ollama_model=_env_str("OLLAMA_MODEL", "qwen3.5:9b"),
         ollama_timeout_seconds=_env_int("OLLAMA_TIMEOUT_SECONDS", 60),
         mlx_model=_env_str("MLX_MODEL", "mlx-community/Qwen2.5-7B-Instruct-4bit"),
-        mlx_max_tokens=_env_int("MLX_MAX_TOKENS", 2048),
+        mlx_draft_model=_env_str("MLX_DRAFT_MODEL", ""),
+        mlx_max_tokens=_env_int("MLX_MAX_TOKENS", 150),
+        temperature=_env_float("TEMPERATURE", 0.3),
         wake_word=_env_str("WAKE_WORD", "hey jarvis"),
         wake_word_model=_env_str("WAKE_WORD_MODEL", "hey_jarvis"),
         wake_word_threshold=_env_float("WAKE_WORD_THRESHOLD", 0.5),
