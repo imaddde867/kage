@@ -33,11 +33,8 @@ _LIVE_CONTEXT_HINTS = {
     "notes",
     "today",
     "tomorrow",
-    "things",
     "project",
     "projects",
-    "inbox",
-    "area",
 }
 
 # Sentence boundary: end of sentence followed by space or end of string.
