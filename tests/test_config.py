@@ -13,7 +13,7 @@ class ConfigImportTests(unittest.TestCase):
     def test_defaults_load_without_dotenv_dependency(self) -> None:
         settings = config.get_settings()
         self.assertEqual(settings.ollama_base_url, "http://localhost:11434")
-        self.assertEqual(settings.ollama_model, "qwen3:8b")
+        self.assertEqual(settings.ollama_model, "qwen3.5:9b")
 
 
 if __name__ == "__main__":

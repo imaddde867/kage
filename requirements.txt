@@ -1,7 +1,9 @@
 # LLM
 ollama
 
-# Speech to text (local Whisper — runs on CPU, no GPU needed)
+# Speech to text — Apple native (fast, hardware-accelerated, no model load)
+SpeechRecognition
+# Speech to text fallback — local Whisper (runs on CPU, no GPU needed)
 faster-whisper
 
 # Audio recording + playback
@@ -12,7 +14,7 @@ soundfile
 # Wake word detection
 openwakeword
 
-# TTS (neural, local, CPU-only, ~25MB model)
+# TTS (neural, local, CPU-only, ~25MB model — optional, macos_say is default)
 kittentts
 
 # Utilities
