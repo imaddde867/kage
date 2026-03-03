@@ -79,8 +79,7 @@ class AssistantRuntime:
             pass
 
     def respond(self, user_text: str) -> None:
-        response = self.brain.think(user_text)
-        self.speaker.speak(response)
+        self.brain.think_stream(user_text, self.speaker.speak)
 
     def run_once(self) -> None:
         self.listener.wait_for_wake_word()
