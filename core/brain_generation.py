@@ -81,7 +81,9 @@ class GenerationRuntime:
             pass
         print("  Ready.\n", flush=True)
 
-    def stream_raw(self, prompt: str, *, max_tokens: int | None = None) -> Iterator[str]:
+    def stream_raw(
+        self, prompt: str, *, max_tokens: int | None = None, track_stats: bool = True
+    ) -> Iterator[str]:
         tokens = max_tokens if max_tokens is not None else self.settings.mlx_max_tokens
         if self.backend == _BACKEND_MLX_VLM:
             gen_iter = iter(
@@ -122,13 +124,14 @@ class GenerationRuntime:
                 if text:
                     yield text
         finally:
-            self.last_stats.clear()
-            self.last_stats.update(
-                {
-                    "backend": self.backend,
-                    "tokens": total_tokens,
-                    "gen_seconds": pure_gen_s,
-                    "tok_per_sec": total_tokens / pure_gen_s if pure_gen_s > 0 else 0.0,
-                }
-            )
+            if track_stats:
+                self.last_stats.clear()
+                self.last_stats.update(
+                    {
+                        "backend": self.backend,
+                        "tokens": total_tokens,
+                        "gen_seconds": pure_gen_s,
+                        "tok_per_sec": total_tokens / pure_gen_s if pure_gen_s > 0 else 0.0,
+                    }
+                )
 

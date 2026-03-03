@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import re
-import threading
 import time
 from collections import deque
 from collections.abc import Iterator
@@ -36,20 +35,25 @@ class BrainService:
 
         if getattr(self.settings, "second_brain_enabled", True):
             from core.second_brain.entity_store import EntityStore
-            from core.second_brain.extractor import EntityExtractor
+            from core.second_brain.llm_extractor import LLMEntityExtractor
             from core.second_brain.planner import IntentRouter
             from core.second_brain.proactive import ProactiveEngine
 
             self._entity_store = EntityStore(self.memory.db_path)
-            self._extractor = EntityExtractor()
             self._router = IntentRouter()
             self._proactive = ProactiveEngine(self._entity_store, self.settings)
+            # Initialized after warmup so tokenizer is ready
+            self._llm_extractor: LLMEntityExtractor | None = None
 
         self._warmup()
 
     def _warmup(self) -> None:
         prompt = self._build_prompt("Hello", text_mode=False)
         self._runtime.warmup(prompt, max_tokens=5)
+        # Tokenizer is ready after warmup — initialize LLM extractor now
+        if hasattr(self, "_llm_extractor") and self._llm_extractor is None:
+            from core.second_brain.llm_extractor import LLMEntityExtractor
+            self._llm_extractor = LLMEntityExtractor(self._runtime, self._runtime.tokenizer)
 
     def _system_prompt(self, *, text_mode: bool = False) -> str:
         return build_system_prompt(self.settings.user_name, text_mode=text_mode)
@@ -133,9 +137,11 @@ class BrainService:
         yield from self._runtime.stream_raw(prompt)
 
     def _extract_and_store(self, user_input: str, exchange_id: str) -> None:
+        if not self._llm_extractor:
+            return
         t0 = time.perf_counter()
         try:
-            entities = self._extractor.extract(user_input)
+            entities = self._llm_extractor.extract(user_input)
             for entity in entities:
                 self._entity_store.upsert(
                     entity.kind,
@@ -161,19 +167,12 @@ class BrainService:
             logger.exception("Failed to persist exchange")
             exchange_id = None
 
-        should_extract = (
+        if (
             exchange_id is not None
-            and route is not None
-            and route.should_extract
             and getattr(self.settings, "extraction_enabled", True)
-            and hasattr(self, "_extractor")
-        )
-        if should_extract:
-            threading.Thread(
-                target=self._extract_and_store,
-                args=(user_input, exchange_id),
-                daemon=True,
-            ).start()
+            and hasattr(self, "_entity_store")
+        ):
+            self._extract_and_store(user_input, exchange_id)
 
     def think_stream(self, user_input: str) -> Iterator[str]:
         self._update_policy_state(user_input)
