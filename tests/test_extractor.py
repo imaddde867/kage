@@ -40,6 +40,19 @@ class EntityExtractorTests(unittest.TestCase):
         entities = self.extractor.extract("What is the capital of France?")
         self.assertEqual(entities, [])
 
+    def test_extract_task_not_triggered_for_question(self) -> None:
+        entities = self.extractor.extract(
+            "I need to find the most frequent element in a list. What's the most efficient approach?"
+        )
+        tasks = [e for e in entities if e.kind == "task"]
+        self.assertEqual(len(tasks), 0)
+
+    def test_extract_profile_with_actually_adverb(self) -> None:
+        entities = self.extractor.extract("I actually live in Turku.")
+        profiles = [e for e in entities if e.kind == "profile"]
+        self.assertEqual(len(profiles), 1)
+        self.assertIn("Turku", profiles[0].value)
+
     def test_extract_date_tomorrow_resolves_correctly(self) -> None:
         entities = self.extractor.extract("remind me to call John tomorrow")
         tasks = [e for e in entities if e.kind == "task"]

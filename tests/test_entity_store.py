@@ -59,6 +59,16 @@ class EntityStoreTests(unittest.TestCase):
         result = store.recall_for_prompt(char_budget=100)
         self.assertLessEqual(len(result), 100)
 
+    def test_recall_personal_context_excludes_tasks(self) -> None:
+        store = self._store()
+        store.upsert("task", "review_pr", "review the PR")
+        store.upsert("profile", "location", "Turku Finland")
+        store.upsert("preference", "concise", "prefers concise answers")
+        result = store.recall_personal_context()
+        self.assertIn("Turku Finland", result)
+        self.assertIn("concise", result)
+        self.assertNotIn("review the PR", result)
+
     def test_recall_for_prompt_excludes_done_entities(self) -> None:
         store = self._store()
         eid = store.upsert("task", "done_task", "a finished task")
