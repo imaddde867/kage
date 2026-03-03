@@ -79,7 +79,22 @@ class AssistantRuntime:
             pass
 
     def respond(self, user_text: str) -> None:
-        self.brain.think_stream(user_text, self.speaker.speak)
+        print("\n[Kage]: ", end="", flush=True)
+        session = self.speaker.begin_streaming_session()
+        sentences: list[str] = []
+
+        def on_sentence(s: str) -> None:
+            print(s, end=" ", flush=True)
+            sentences.append(s)
+            if session:
+                session.queue(s)
+
+        self.brain.think_stream(user_text, on_sentence)
+        print("\n")
+        if session:
+            session.wait()
+        elif sentences:
+            self.speaker.speak(" ".join(sentences), display=False)
 
     def run_once(self) -> None:
         self.listener.wait_for_wake_word()
@@ -145,6 +160,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use terminal text input instead of wake-word audio.",
     )
+    parser.add_argument(
+        "--list-voices",
+        action="store_true",
+        help="List available AVSpeech voices and exit.",
+    )
     return parser.parse_args()
 
 
@@ -153,6 +173,10 @@ def main() -> int:
         level=logging.ERROR, format="[%(levelname)s] %(name)s: %(message)s"
     )
     args = parse_args()
+    if args.list_voices:
+        from core.speaker import list_voices
+        list_voices()
+        return 0
     runtime = AssistantRuntime()
     return runtime.run_text_forever() if args.text else runtime.run_forever()
 

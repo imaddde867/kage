@@ -9,6 +9,7 @@ def get_context() -> str:
     Returns a formatted string for LLM context injection.
     """
     script = """
+    if application "Calendar" is not running then return ""
     set output to ""
     set today to current date
     set startOfDay to today - (time of today)

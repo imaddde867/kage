@@ -73,6 +73,8 @@ class Settings:
     kittentts_model: str
     kittentts_sample_rate: int
     say_fallback_voice: str
+    avspeech_voice_id: str
+    avspeech_rate: float
 
     # Memory
     memory_dir: str
@@ -107,6 +109,8 @@ def get_settings() -> Settings:
         kittentts_model=_env_str("KITTENTTS_MODEL", ""),
         kittentts_sample_rate=_env_int("KITTENTTS_SAMPLE_RATE", 24000),
         say_fallback_voice=_env_str("MACOS_SAY_VOICE", _env_str("SAY_FALLBACK_VOICE", "Ava (Enhanced)")),
+        avspeech_voice_id=_env_str("AVSPEECH_VOICE_ID", ""),
+        avspeech_rate=_env_float("AVSPEECH_RATE", 0.52),
         memory_dir=_env_str("MEMORY_DIR", "./data/memory"),
         user_name=_env_str("USER_NAME", "Imad"),
         sample_rate=_env_int("SAMPLE_RATE", 16000),
