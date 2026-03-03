@@ -197,7 +197,7 @@ class BrainService:
                 on_sentence(sentence)
                 parts.append(sentence)
             full_reply = " ".join(parts)
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.RequestException, Exception) as exc:
+        except Exception as exc:
             logger.warning("Streaming failed (%s), falling back to non-streaming", exc)
             full_reply = self.think(user_input)
             on_sentence(full_reply)
