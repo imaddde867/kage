@@ -27,18 +27,20 @@ _DEFAULT_TTS_SPEED = 1.0
 _TTS_CHUNK_MAX_CHARS = 180
 _TTS_CHUNK_GAP_SECONDS = 0.12
 _KITTENTTS_PROFILE_SPECS = {
-    "nano": None,  # library default loader (currently nano)
+    "nano": None,
     "mini": ("KittenML/kitten-tts-mini-0.8", "kitten_tts_mini_v0_8.onnx"),
 }
-_FALLBACK_TTS_BACKEND = "kittentts"  # used when TTS_BACKEND is set to an unknown value
+_FALLBACK_TTS_BACKEND = "kittentts"
 
 
 def _normalize_tts_backend(value: str) -> str:
     raw = (value or "").strip().lower()
     if raw in {"", "default", "kittentts", "kitten"}:
         return "kittentts"
-    if raw in {"macos", "say", "macos_say", "apple", "siri"}:
+    if raw in {"macos", "say", "macos_say"}:
         return "macos_say"
+    if raw in {"avspeech", "av", "avfoundation"}:
+        return "avspeech"
     return raw
 
 
@@ -98,11 +100,6 @@ def _split_tts_chunks(text: str, max_chars: int = _TTS_CHUNK_MAX_CHARS) -> list[
 
 
 def _configure_phonemizer_espeak_library() -> None:
-    """
-    phonemizer sometimes fails to locate Homebrew's espeak shared library on macOS
-    even when the `espeak` binary is installed. Try common dylib locations and
-    set the backend library before KittenTTS initializes.
-    """
     try:
         from phonemizer.backend import EspeakBackend
     except Exception:
@@ -131,7 +128,6 @@ def _configure_phonemizer_espeak_library() -> None:
         if candidate_str in seen:
             continue
         seen.add(candidate_str)
-
         try:
             EspeakBackend.set_library(candidate_str)
             EspeakBackend(language="en-us")
@@ -147,19 +143,12 @@ def _configure_phonemizer_espeak_library() -> None:
 
 
 def _resolve_kittentts_model_path(value: str) -> str | None:
-    """
-    kittentts expects a local ONNX file path when model_path is provided.
-    If the configured value is empty or not a readable file (for example an HF
-    repo id), return None so KittenTTS uses its default model download path.
-    """
     raw = (value or "").strip()
     if not raw:
         return None
-
     path = Path(raw).expanduser()
     if path.is_file():
         return str(path)
-
     print(
         f"[Speaker] Ignoring KITTENTTS_MODEL='{raw}' (expected local .onnx file path). "
         "Using KittenTTS default model."
@@ -169,9 +158,7 @@ def _resolve_kittentts_model_path(value: str) -> str | None:
 
 def _normalize_kittentts_profile(value: str) -> str:
     raw = (value or "").strip().lower()
-    if raw in {"", "default"}:
-        return "nano"
-    if raw in {"nano", "nano-0.1"}:
+    if raw in {"", "default", "nano", "nano-0.1"}:
         return "nano"
     if raw in {"mini", "mini-0.8"}:
         return "mini"
@@ -203,6 +190,64 @@ def _create_kittentts_model(settings: config.Settings) -> Any:
     return KittenTTS(model_path=model_path, voices_path=voices_path)
 
 
+# ── AVSpeech backend ──────────────────────────────────────────────────────────
+
+class _AVSpeechSession:
+    """Streaming TTS session backed by AVSpeechSynthesizer.
+
+    Sentences are queued as they arrive and played back seamlessly — no
+    per-sentence process overhead, no gaps between sentences.
+    """
+
+    def __init__(self, voice_id: str, rate: float) -> None:
+        from AVFoundation import AVSpeechSynthesizer, AVSpeechSynthesisVoice  # type: ignore[import]
+        self._synth = AVSpeechSynthesizer.alloc().init()
+        self._rate = rate
+        self._voice = (
+            AVSpeechSynthesisVoice.voiceWithIdentifier_(voice_id) if voice_id else None
+        )
+
+    def queue(self, text: str) -> None:
+        """Queue an utterance. Returns immediately; playback is asynchronous."""
+        from AVFoundation import AVSpeechUtterance  # type: ignore[import]
+        utt = AVSpeechUtterance.speechUtteranceWithString_(text)
+        utt.setRate_(self._rate)
+        if self._voice:
+            utt.setVoice_(self._voice)
+        self._synth.speakUtterance_(utt)
+
+    def wait(self) -> None:
+        """Block until all queued utterances have finished playing."""
+        from Foundation import NSDate, NSDefaultRunLoopMode, NSRunLoop  # type: ignore[import]
+        while self._synth.isSpeaking():
+            NSRunLoop.currentRunLoop().runMode_beforeDate_(
+                NSDefaultRunLoopMode, NSDate.dateWithTimeIntervalSinceNow_(0.05)
+            )
+
+
+def list_voices() -> None:
+    """Print all available AVSpeechSynthesisVoice names and identifiers."""
+    try:
+        from AVFoundation import AVSpeechSynthesisVoice  # type: ignore[import]
+    except ImportError:
+        print("pyobjc-framework-AVFoundation not installed.")
+        return
+    voices = AVSpeechSynthesisVoice.speechVoices()
+    en = sorted(
+        (v.name(), v.identifier())
+        for v in voices
+        if "en" in (v.language() or "").lower()
+    )
+    print(f"\n  {'Voice name':<42} Identifier")
+    print(f"  {'-'*42} {'-'*55}")
+    for name, ident in en:
+        print(f"  {name:<42} {ident}")
+    print("\nSet AVSPEECH_VOICE_ID=<identifier> in your .env")
+    print("Download more voices: System Settings → Accessibility → Spoken Content → System Voice → Customize\n")
+
+
+# ── SpeakerService ────────────────────────────────────────────────────────────
+
 class SpeakerService:
     def __init__(self, *, settings: config.Settings | None = None) -> None:
         self.settings = settings or config.get_settings()
@@ -214,42 +259,54 @@ class SpeakerService:
     def load_engine(self) -> None:
         if self._load_attempted:
             return
-
         self._load_attempted = True
+
+        if self._tts_backend == "avspeech":
+            try:
+                from AVFoundation import AVSpeechSynthesizer  # type: ignore[import]  # noqa: F401
+                print(f"[Speaker] AVSpeech ready. Voice ID: '{self.settings.avspeech_voice_id or 'system default'}'")
+            except ImportError:
+                print("[Speaker] pyobjc-framework-AVFoundation not installed. Falling back to macOS say.")
+                print("[Speaker] Run: pip install pyobjc-framework-AVFoundation")
+                self._tts_backend = "macos_say"
+            return
 
         if self._tts_backend == "macos_say":
             print(f"[Speaker] Using macOS say voice: {self.settings.say_fallback_voice}")
             return
 
         if self._tts_backend != "kittentts":
-            print(
-                f"[Speaker] Unknown TTS_BACKEND='{self.settings.tts_backend}'. "
-                f"Using '{_FALLBACK_TTS_BACKEND}'."
-            )
+            print(f"[Speaker] Unknown TTS_BACKEND='{self.settings.tts_backend}'. Using '{_FALLBACK_TTS_BACKEND}'.")
             self._tts_backend = _FALLBACK_TTS_BACKEND
 
         print("[Speaker] Loading KittenTTS model...")
-
         try:
             _configure_phonemizer_espeak_library()
             self._model = _create_kittentts_model(self.settings)
             self._use_kittentts = True
             print(
                 f"[Speaker] KittenTTS ready. Profile: {_normalize_kittentts_profile(self.settings.kittentts_profile)} "
-                f"Voice: {self.settings.tts_voice} "
-                f"→ {_resolve_voice(self.settings.tts_voice)}"
+                f"Voice: {self.settings.tts_voice} → {_resolve_voice(self.settings.tts_voice)}"
             )
         except ImportError:
-            print("[Speaker] KittenTTS not installed. Run: pip install kittentts")
-            print("[Speaker] Also make sure espeak is installed: brew install espeak")
-            print("[Speaker] Falling back to macOS say.")
+            print("[Speaker] KittenTTS not installed. Falling back to macOS say.")
             self._tts_backend = "macos_say"
         except Exception as exc:
             print(f"[Speaker] KittenTTS failed to load: {exc}")
-            if "espeak" in str(exc).lower():
-                print("[Speaker] If you see espeak errors, run: brew install espeak")
-            print("[Speaker] Falling back to macOS say.")
             self._tts_backend = "macos_say"
+
+    def begin_streaming_session(self) -> _AVSpeechSession | None:
+        """Return an AVSpeechSession for gap-free streaming TTS, or None to fall back."""
+        if not self._load_attempted:
+            self.load_engine()
+        if self._tts_backend != "avspeech":
+            return None
+        try:
+            return _AVSpeechSession(self.settings.avspeech_voice_id, self.settings.avspeech_rate)
+        except Exception as exc:
+            print(f"[Speaker] AVSpeech session failed: {exc}. Falling back to say.")
+            self._tts_backend = "macos_say"
+            return None
 
     def _speak_kittentts(self, text: str) -> bool:
         if not self._use_kittentts or self._model is None:
@@ -268,7 +325,6 @@ class SpeakerService:
             except Exception as exc:
                 print(f"[Speaker] KittenTTS generate error on chunk: {exc}")
                 return False
-
             rendered_chunks.append(np.asarray(audio, dtype=np.float32).reshape(-1))
 
         if not rendered_chunks:
@@ -279,9 +335,9 @@ class SpeakerService:
         else:
             gap = np.zeros(int(sample_rate * _TTS_CHUNK_GAP_SECONDS), dtype=np.float32)
             parts: list[np.ndarray] = []
-            for index, chunk_audio in enumerate(rendered_chunks):
+            for i, chunk_audio in enumerate(rendered_chunks):
                 parts.append(chunk_audio)
-                if index < len(rendered_chunks) - 1:
+                if i < len(rendered_chunks) - 1:
                     parts.append(gap)
             combined = np.concatenate(parts)
 
@@ -302,7 +358,7 @@ class SpeakerService:
             print(f"[Speaker] macOS say failed ({exc.returncode}).")
 
     def speak(self, text: str, *, display: bool = True) -> None:
-        """Speak text aloud. Pass display=False to suppress the console print (e.g. when streaming)."""
+        """Speak text aloud. Pass display=False to suppress the console print."""
         if display:
             print(f"\n[Kage]: {text}\n")
         clean = _sanitize_text(text)
@@ -311,6 +367,16 @@ class SpeakerService:
 
         if not self._load_attempted:
             self.load_engine()
+
+        if self._tts_backend == "avspeech":
+            try:
+                session = _AVSpeechSession(self.settings.avspeech_voice_id, self.settings.avspeech_rate)
+                session.queue(clean)
+                session.wait()
+                return
+            except Exception as exc:
+                print(f"[Speaker] AVSpeech error: {exc}. Falling back to say.")
+                self._tts_backend = "macos_say"
 
         if self._tts_backend == "macos_say":
             self._speak_macos_say(clean)
@@ -338,4 +404,4 @@ def speak(text: str) -> None:
     get_default_speaker().speak(text)
 
 
-__all__ = ["SpeakerService", "get_default_speaker", "speak", "VOICE_MAP"]
+__all__ = ["SpeakerService", "get_default_speaker", "speak", "list_voices", "VOICE_MAP"]
