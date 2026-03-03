@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import logging
+import math
+import re
+import time
 from typing import Any
 
 import numpy as np
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except ImportError:  # pragma: no cover - optional in test environments
+    sd = None  # type: ignore[assignment]
 
 import config
 
@@ -18,6 +24,10 @@ class ListenerService:
         self._wake_model: Any | None = None
         self._models_loaded = False
         self._stt_backend = self._normalize_backend(self.settings.stt_backend)
+        self._interrupt_policy = self._normalize_interrupt_policy(self.settings.interrupt_policy)
+        self._interrupt_wake_armed = False
+        self._interrupt_speech_frames = 0
+        self._interrupt_wake_deadline = 0.0
 
     @staticmethod
     def _normalize_backend(value: str) -> str:
@@ -25,6 +35,19 @@ class ListenerService:
         if raw in {"whisper", "faster_whisper", "faster-whisper"}:
             return "whisper"
         return "apple"
+
+    @staticmethod
+    def _normalize_interrupt_policy(value: str) -> str:
+        raw = (value or "").strip().lower().replace("-", "_")
+        if raw in {"wake_word_then_speech", "wake_then_speech", "wake_word_and_speech"}:
+            return "wake_word_then_speech"
+        return "wake_word_then_speech"
+
+    @staticmethod
+    def _require_sounddevice() -> Any:
+        if sd is None:
+            raise RuntimeError("sounddevice is not installed. Install it with: pip install sounddevice")
+        return sd
 
     def load_models(self) -> None:
         if self._models_loaded:
@@ -53,7 +76,8 @@ class ListenerService:
         if not self._models_loaded:
             self.load_models()
         chunk = self.settings.wake_word_chunk_size
-        with sd.InputStream(samplerate=self.settings.sample_rate, channels=1, dtype="int16", blocksize=chunk) as stream:
+        sd_lib = self._require_sounddevice()
+        with sd_lib.InputStream(samplerate=self.settings.sample_rate, channels=1, dtype="int16", blocksize=chunk) as stream:
             while True:
                 audio, _ = stream.read(chunk)
                 scores = self._wake_model.predict(np.asarray(audio).flatten().astype(np.int16))
@@ -70,7 +94,8 @@ class ListenerService:
         silence_needed = int(self.settings.silence_duration * self.settings.sample_rate / chunk)
         max_chunks = int(self.settings.max_record_seconds * self.settings.sample_rate / chunk)
 
-        with sd.InputStream(samplerate=self.settings.sample_rate, channels=1, dtype="int16", blocksize=chunk) as stream:
+        sd_lib = self._require_sounddevice()
+        with sd_lib.InputStream(samplerate=self.settings.sample_rate, channels=1, dtype="int16", blocksize=chunk) as stream:
             for _ in range(max_chunks):
                 audio, _ = stream.read(chunk)
                 flat = np.asarray(audio, dtype=np.int16).reshape(-1)
@@ -84,12 +109,78 @@ class ListenerService:
 
         return np.concatenate(chunks).astype(np.int16, copy=False) if chunks else np.array([], dtype=np.int16)
 
+    def reset_interrupt_detector(self) -> None:
+        self._interrupt_wake_armed = False
+        self._interrupt_speech_frames = 0
+        self._interrupt_wake_deadline = 0.0
+
+    def detect_interrupt(self, audio_chunk: np.ndarray) -> bool:
+        if self._wake_model is None:
+            return False
+        if self._interrupt_policy != "wake_word_then_speech":
+            return False
+
+        flat = np.asarray(audio_chunk, dtype=np.int16).reshape(-1)
+        if flat.size == 0:
+            return False
+
+        now = time.monotonic()
+        wake_scores = self._wake_model.predict(flat)
+        wake_hit = any(float(score) >= self.settings.interrupt_min_score for score in wake_scores.values())
+        if wake_hit:
+            self._interrupt_wake_armed = True
+            self._interrupt_speech_frames = 0
+            self._interrupt_wake_deadline = now + 2.0
+
+        if not self._interrupt_wake_armed:
+            return False
+
+        if now > self._interrupt_wake_deadline:
+            self.reset_interrupt_detector()
+            return False
+
+        if np.abs(flat).mean() >= self.settings.silence_threshold:
+            self._interrupt_speech_frames += 1
+        else:
+            self._interrupt_speech_frames = max(0, self._interrupt_speech_frames - 1)
+
+        chunk_ms = (flat.size / self.settings.sample_rate) * 1000.0
+        needed_frames = max(1, math.ceil(self.settings.interrupt_hold_ms / max(chunk_ms, 1.0)))
+        if self._interrupt_speech_frames >= needed_frames:
+            self.reset_interrupt_detector()
+            return True
+
+        return False
+
+    def _normalize_transcript_name(self, text: str) -> str:
+        if not text or not self.settings.stt_name_normalization_enabled:
+            return text
+
+        canonical = self.settings.assistant_name.strip()
+        if not canonical:
+            return text
+
+        variants = tuple(v.strip() for v in self.settings.stt_name_variants if v.strip())
+        if not variants:
+            return text
+
+        options = "|".join(
+            sorted((re.escape(v) for v in variants), key=len, reverse=True)
+        )
+        pattern = re.compile(
+            rf"(?<![A-Za-z0-9_])(?:{options})(?![A-Za-z0-9_])",
+            flags=re.IGNORECASE,
+        )
+        return pattern.sub(canonical, text)
+
     def transcribe(self, audio: np.ndarray) -> str:
         if audio.size == 0:
             return ""
         if self._stt_backend == "apple":
-            return self._transcribe_apple(audio)
-        return self._transcribe_whisper(audio)
+            text = self._transcribe_apple(audio)
+        else:
+            text = self._transcribe_whisper(audio)
+        return self._normalize_transcript_name(text)
 
     def _transcribe_apple(self, audio: np.ndarray) -> str:
         try:

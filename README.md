@@ -61,7 +61,18 @@ python main.py            # voice mode (wake word → speak → respond)
 | `WAKE_WORD` | `hey jarvis` | Display name |
 | `WAKE_WORD_MODEL` | `hey_jarvis` | openwakeword model file |
 | `WAKE_WORD_THRESHOLD` | `0.5` | Detection sensitivity (0–1) |
+| `ALLOW_BARGE_IN` | `true` | Allow interrupting Kage while it speaks |
+| `INTERRUPT_POLICY` | `wake_word_then_speech` | Barge-in trigger policy |
+| `INTERRUPT_MIN_SCORE` | `0.55` | Wake score threshold during TTS |
+| `INTERRUPT_HOLD_MS` | `220` | Required speech duration after wake hit |
+| `INTERRUPT_DEBOUNCE_MS` | `500` | Minimum gap between accepted interrupts |
+| `POST_TTS_GUARD_MS` | `250` | Delay before opening mic after TTS stops |
 | `USER_NAME` | `Imad` | Your name (used in prompts) |
+| `ASSISTANT_NAME` | `Kage` | Canonical assistant name kept in text |
+| `TTS_NAME_OVERRIDE_ENABLED` | `true` | Apply spoken-name replacement before TTS |
+| `TTS_NAME_PRONUNCIATION` | `Kah-gay` | Spoken alias to force hard-g pronunciation |
+| `STT_NAME_NORMALIZATION_ENABLED` | `true` | Normalize recognized variants back to canonical name |
+| `STT_NAME_VARIANTS` | `kage,cage,kaj,kaige,kahge,ka-geh` | Comma-separated variants mapped to `ASSISTANT_NAME` |
 | `MEMORY_DIR` | `./data/memory` | SQLite DB location |
 
 ---
@@ -74,6 +85,7 @@ main.py
 └── text mode:  input()         → BrainService → speak()
 
 core/
+├── audio_coordinator.py state machine for listen/think/speak + barge-in guards
 ├── brain.py     BrainService.think_stream() — Ollama streaming, yields sentences
 ├── listener.py  ListenerService — wake word + record + STT
 ├── memory.py    MemoryStore — SQLite conversations, keyword recall

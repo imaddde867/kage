@@ -38,6 +38,27 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _env_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    parts = tuple(p.strip() for p in raw.split(",") if p.strip())
+    return parts if parts else default
+
+
 @dataclass(frozen=True)
 class Settings:
     # LLM
@@ -70,6 +91,7 @@ class Settings:
 
     # User
     user_name: str
+    assistant_name: str
 
     # Audio
     sample_rate: int
@@ -78,6 +100,20 @@ class Settings:
     silence_threshold: int
     silence_duration: float
     max_record_seconds: int
+
+    # Turn-taking
+    allow_barge_in: bool
+    interrupt_policy: str
+    interrupt_min_score: float
+    interrupt_hold_ms: int
+    interrupt_debounce_ms: int
+    post_tts_guard_ms: int
+
+    # Pronunciation controls
+    tts_name_override_enabled: bool
+    tts_name_pronunciation: str
+    stt_name_normalization_enabled: bool
+    stt_name_variants: tuple[str, ...]
 
 
 @lru_cache(maxsize=1)
@@ -102,10 +138,24 @@ def get() -> Settings:
         kokoro_lang_code=_env_str("KOKORO_LANG_CODE", "en-us"),
         memory_dir=_env_str("MEMORY_DIR", "./data/memory"),
         user_name=_env_str("USER_NAME", "Imad"),
+        assistant_name=_env_str("ASSISTANT_NAME", "Kage"),
         sample_rate=_env_int("SAMPLE_RATE", 16000),
         wake_word_chunk_size=_env_int("WAKE_WORD_CHUNK_SIZE", 1280),
         record_chunk_size=_env_int("RECORD_CHUNK_SIZE", 1024),
         silence_threshold=_env_int("SILENCE_THRESHOLD", 500),
         silence_duration=_env_float("SILENCE_DURATION", 1.5),
         max_record_seconds=_env_int("MAX_RECORD_SECONDS", 30),
+        allow_barge_in=_env_bool("ALLOW_BARGE_IN", True),
+        interrupt_policy=_env_str("INTERRUPT_POLICY", "wake_word_then_speech"),
+        interrupt_min_score=_env_float("INTERRUPT_MIN_SCORE", 0.55),
+        interrupt_hold_ms=_env_int("INTERRUPT_HOLD_MS", 220),
+        interrupt_debounce_ms=_env_int("INTERRUPT_DEBOUNCE_MS", 500),
+        post_tts_guard_ms=_env_int("POST_TTS_GUARD_MS", 250),
+        tts_name_override_enabled=_env_bool("TTS_NAME_OVERRIDE_ENABLED", True),
+        tts_name_pronunciation=_env_str("TTS_NAME_PRONUNCIATION", "Kah-gay"),
+        stt_name_normalization_enabled=_env_bool("STT_NAME_NORMALIZATION_ENABLED", True),
+        stt_name_variants=_env_csv(
+            "STT_NAME_VARIANTS",
+            ("kage", "cage", "kaj", "kaige", "kahge", "ka-geh"),
+        ),
     )
