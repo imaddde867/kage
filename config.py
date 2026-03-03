@@ -41,9 +41,12 @@ def _env_float(name: str, default: float) -> float:
 @dataclass(frozen=True)
 class Settings:
     # LLM
+    llm_backend: str
     ollama_base_url: str
     ollama_model: str
     ollama_timeout_seconds: int
+    mlx_model: str
+    mlx_max_tokens: int
 
     # Wake word
     wake_word: str
@@ -75,9 +78,12 @@ class Settings:
 @lru_cache(maxsize=1)
 def get() -> Settings:
     return Settings(
+        llm_backend=_env_str("LLM_BACKEND", "mlx"),
         ollama_base_url=_env_str("OLLAMA_BASE_URL", "http://localhost:11434"),
         ollama_model=_env_str("OLLAMA_MODEL", "qwen3.5:9b"),
         ollama_timeout_seconds=_env_int("OLLAMA_TIMEOUT_SECONDS", 60),
+        mlx_model=_env_str("MLX_MODEL", "mlx-community/Qwen2.5-7B-Instruct-4bit"),
+        mlx_max_tokens=_env_int("MLX_MAX_TOKENS", 2048),
         wake_word=_env_str("WAKE_WORD", "hey jarvis"),
         wake_word_model=_env_str("WAKE_WORD_MODEL", "hey_jarvis"),
         wake_word_threshold=_env_float("WAKE_WORD_THRESHOLD", 0.5),

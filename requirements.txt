@@ -1,6 +1,11 @@
-# LLM
+# LLM — Ollama backend (HTTP, Metal GPU via llama.cpp)
 ollama
 requests
+
+# LLM — MLX backend (Apple Neural Engine + GPU, direct Python, no daemon)
+# Install: pip install mlx-lm
+# Models: https://huggingface.co/mlx-community
+mlx-lm
 
 # Speech to text — Apple native (fast, hardware-accelerated, no model load)
 SpeechRecognition
