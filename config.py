@@ -85,6 +85,7 @@ class Settings:
 
     # Memory
     memory_dir: str
+    recent_turns: int
 
     # User
     user_name: str
@@ -111,6 +112,9 @@ class Settings:
     stt_name_normalization_enabled: bool
     stt_name_variants: tuple[str, ...]
 
+    # Text mode UX
+    text_mode_tts_enabled: bool
+
 
 @lru_cache(maxsize=1)
 def get() -> Settings:
@@ -130,6 +134,7 @@ def get() -> Settings:
         kokoro_speed=_env_float("KOKORO_SPEED", 1.0),
         kokoro_lang_code=_env_str("KOKORO_LANG_CODE", "en-us"),
         memory_dir=_env_str("MEMORY_DIR", "./data/memory"),
+        recent_turns=max(0, _env_int("RECENT_TURNS", 4)),
         user_name=_env_str("USER_NAME", "Imad"),
         assistant_name=_env_str("ASSISTANT_NAME", "Kage"),
         sample_rate=_env_int("SAMPLE_RATE", 16000),
@@ -150,4 +155,5 @@ def get() -> Settings:
             "STT_NAME_VARIANTS",
             ("kage", "cage", "kaj", "kaige", "kahge", "ka-geh"),
         ),
+        text_mode_tts_enabled=_env_bool("TEXT_MODE_TTS_ENABLED", False),
     )

@@ -1,7 +1,7 @@
 """
 Kage (影) — Local Personal AI for macOS
 Voice: wake word → STT → LLM → Kokoro TTS
-Text: input() → LLM → print + Kokoro TTS
+Text: input() → LLM → print (optional Kokoro TTS)
 """
 
 from __future__ import annotations
@@ -24,6 +24,29 @@ from core.listener import ListenerService
 from core.speaker import speak, stop_speaking
 
 logging.basicConfig(level=logging.ERROR, format="[%(levelname)s] %(name)s: %(message)s")
+
+
+def _print_timing_stats(
+    *,
+    label: str,
+    t0: float,
+    t_first: float | None,
+    t_end: float,
+    tts_total: float,
+    stats: dict[str, object],
+) -> None:
+    ttfs = (t_first - t0) if t_first else 0.0
+    tok = stats.get("tokens", "?")
+    tps = stats.get("tok_per_sec", 0.0)
+    backend = stats.get("backend", "?")
+    tps_str = f"{float(tps):.1f} tok/s" if isinstance(tps, (int, float)) and tps else "?"
+    print(
+        f"  ⏱  [{backend}] {label}: {ttfs:.2f}s | "
+        f"gen: {tok} tok @ {tps_str} | "
+        f"tts: {tts_total:.2f}s | "
+        f"total: {t_end - t0:.2f}s",
+        flush=True,
+    )
 
 
 def _monitor_barge_in(
@@ -76,6 +99,7 @@ def respond(
     *,
     listener: ListenerService | None = None,
     coordinator: AudioCoordinator | None = None,
+    speak_enabled: bool = True,
 ) -> bool:
     print("\n[Kage]: ", end="", flush=True)
     t0 = time.perf_counter()
@@ -85,6 +109,31 @@ def respond(
     monitor_stop: threading.Event | None = None
     monitor_thread: threading.Thread | None = None
     cancel_token: threading.Event | None = None
+
+    if not speak_enabled:
+        stream = brain.think_text_stream(user_text)
+        try:
+            for chunk in stream:
+                if t_first_sentence is None:
+                    t_first_sentence = time.perf_counter()
+                print(chunk, end="", flush=True)
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+
+        t_end = time.perf_counter()
+        print("\n")
+        if timing:
+            _print_timing_stats(
+                label="first chunk",
+                t0=t0,
+                t_first=t_first_sentence,
+                t_end=t_end,
+                tts_total=0.0,
+                stats=brain.last_stats,
+            )
+        return False
 
     if listener is not None and coordinator is not None and coordinator.allow_barge_in:
         coordinator.begin_speaking()
@@ -130,18 +179,13 @@ def respond(
     print("\n")
 
     if timing:
-        ttfs = (t_first_sentence - t0) if t_first_sentence else 0.0
-        stats = brain.last_stats
-        tok = stats.get("tokens", "?")
-        tps = stats.get("tok_per_sec", 0.0)
-        backend = stats.get("backend", "?")
-        tps_str = f"{tps:.1f} tok/s" if tps else "?"
-        print(
-            f"  ⏱  [{backend}] first sentence: {ttfs:.2f}s | "
-            f"gen: {tok} tok @ {tps_str} | "
-            f"tts: {tts_total:.2f}s | "
-            f"total: {t_end - t0:.2f}s",
-            flush=True,
+        _print_timing_stats(
+            label="first sentence",
+            t0=t0,
+            t_first=t_first_sentence,
+            t_end=t_end,
+            tts_total=tts_total,
+            stats=brain.last_stats,
         )
 
     return interrupted
@@ -194,7 +238,8 @@ def run_voice(settings: config.Settings, timing: bool = False) -> None:
 
 def run_text(settings: config.Settings, timing: bool = False) -> None:
     brain = BrainService(settings=settings)
-    print("  Kage online. Type your message. 'exit' to quit.\n")
+    tts_mode = "on" if settings.text_mode_tts_enabled else "off"
+    print(f"  Kage online. Type your message. 'exit' to quit. [text-mode TTS: {tts_mode}]\n")
 
     while True:
         try:
@@ -209,7 +254,12 @@ def run_text(settings: config.Settings, timing: bool = False) -> None:
             return
 
         try:
-            respond(brain, user_text, timing=timing)
+            respond(
+                brain,
+                user_text,
+                timing=timing,
+                speak_enabled=settings.text_mode_tts_enabled,
+            )
         except KeyboardInterrupt:
             print("\n[Kage] Going offline.")
             return
