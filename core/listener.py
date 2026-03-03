@@ -11,22 +11,34 @@ import config
 logger = logging.getLogger(__name__)
 
 
+def _normalize_stt_backend(value: str) -> str:
+    raw = (value or "").strip().lower()
+    if raw in {"apple", "macos", "siri", "native"}:
+        return "apple"
+    if raw in {"whisper", "faster_whisper", "faster-whisper"}:
+        return "whisper"
+    return "apple"
+
+
 class ListenerService:
     def __init__(self, *, settings: config.Settings | None = None) -> None:
         self.settings = settings or config.get_settings()
         self._whisper: Any | None = None
         self._wake_model: Any | None = None
         self._models_loaded = False
+        self._stt_backend = _normalize_stt_backend(self.settings.stt_backend)
 
     def load_models(self) -> None:
         if self._models_loaded:
             return
 
-        print("[Listener] Loading Whisper model...")
-        from faster_whisper import WhisperModel
-
-        self._whisper = WhisperModel(self.settings.whisper_model, device="cpu", compute_type="int8")
-        print("[Listener] Whisper ready.")
+        if self._stt_backend == "apple":
+            print("[Listener] STT backend: macOS native speech recognition (no model load needed)")
+        else:
+            print("[Listener] Loading Whisper model...")
+            from faster_whisper import WhisperModel
+            self._whisper = WhisperModel(self.settings.whisper_model, device="cpu", compute_type="int8")
+            print("[Listener] Whisper ready.")
 
         print("[Listener] Loading wake word model...")
         import openwakeword
@@ -100,15 +112,49 @@ class ListenerService:
             return np.array([], dtype=np.int16)
         return np.concatenate(chunks).astype(np.int16, copy=False)
 
-    def transcribe(self, audio: np.ndarray) -> str:
-        """Convert int16 audio array to text via Whisper."""
-        if audio.size == 0:
-            return ""
+    def _transcribe_apple(self, audio: np.ndarray) -> str:
+        """Transcribe using macOS native speech recognition (fast, hardware-accelerated)."""
+        try:
+            import speech_recognition as sr
+        except ImportError:
+            logger.warning("SpeechRecognition not installed. Falling back to Whisper.")
+            self._stt_backend = "whisper"
+            return self._transcribe_whisper(audio)
 
-        self._ensure_models_loaded()
+        try:
+            audio_bytes = audio.tobytes()
+            audio_data = sr.AudioData(audio_bytes, self.settings.sample_rate, 2)
+            recognizer = sr.Recognizer()
+            return recognizer.recognize_apple(audio_data)
+        except sr.UnknownValueError:
+            return ""
+        except Exception as exc:
+            logger.warning("Apple STT failed (%s). Falling back to Whisper.", exc)
+            self._stt_backend = "whisper"
+            if self._whisper is None:
+                print("[Listener] Loading Whisper model as fallback...")
+                from faster_whisper import WhisperModel
+                self._whisper = WhisperModel(self.settings.whisper_model, device="cpu", compute_type="int8")
+            return self._transcribe_whisper(audio)
+
+    def _transcribe_whisper(self, audio: np.ndarray) -> str:
+        """Transcribe using faster-whisper."""
+        if self._whisper is None:
+            from faster_whisper import WhisperModel
+            self._whisper = WhisperModel(self.settings.whisper_model, device="cpu", compute_type="int8")
         audio_f32 = audio.astype(np.float32) / 32768.0
         segments, _ = self._whisper.transcribe(audio_f32, language="en")
         return " ".join(segment.text.strip() for segment in segments).strip()
+
+    def transcribe(self, audio: np.ndarray) -> str:
+        """Convert int16 audio array to text using the configured STT backend."""
+        if audio.size == 0:
+            return ""
+        self._ensure_models_loaded()
+
+        if self._stt_backend == "apple":
+            return self._transcribe_apple(audio)
+        return self._transcribe_whisper(audio)
 
     def listen_and_transcribe(self) -> str:
         """Record then transcribe. Returns text string."""

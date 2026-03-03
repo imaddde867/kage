@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
-from . import calendar, notes, reminders
+from . import calendar, notes, reminders, things
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ ConnectorCallable = Callable[[], str]
 @dataclass
 class ConnectorManager:
     connectors: Iterable[ConnectorCallable] = field(
-        default_factory=lambda: [calendar.get_context, reminders.get_context, notes.get_context]
+        default_factory=lambda: [calendar.get_context, reminders.get_context, notes.get_context, things.get_context]
     )
 
     def __post_init__(self) -> None:
