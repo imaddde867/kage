@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What Is Kage
 
-Kage is a fully local, always-on personal AI for macOS. The voice loop is: wake word (`hey_jarvis` via openwakeword) → STT (macOS native or faster-whisper) → LLM (Ollama/MLX) → TTS (Kokoro-82M via `mlx-audio`). Memory persists across sessions in SQLite (`data/memory/kage_memory.db`).
+Kage is a fully local, always-on personal AI for macOS. The voice loop is: wake word (`hey_jarvis` via openwakeword) → STT (macOS native or faster-whisper) → LLM (Qwen on MLX) → TTS (Kokoro-82M via `mlx-audio`). Memory persists across sessions in SQLite (`data/memory/kage_memory.db`).
 
 ## Commands
 
@@ -13,8 +13,6 @@ Kage is a fully local, always-on personal AI for macOS. The voice loop is: wake 
 micromamba create -n kage python=3.11 pip -y && micromamba activate kage
 pip install -r requirements.txt
 cp .env.example .env
-ollama serve          # separate terminal
-ollama pull qwen3.5:9b
 ```
 
 **Run:**
@@ -23,9 +21,10 @@ python main.py          # voice mode (wake word → listen → respond aloud)
 python main.py --text   # text chat mode (no mic/speaker required)
 ```
 
-**Syntax check (no test suite):**
+**Validation:**
 ```bash
-python -m py_compile main.py config.py core/*.py
+python -m py_compile main.py config.py core/*.py tests/*.py
+python -m unittest discover -s tests -p 'test_*.py'
 python -c "import config; print(config.get())"   # verify settings load
 ```
 
@@ -42,7 +41,7 @@ Text loop:  input() → think_stream() → print + speak()
 
 **`config.py`** — frozen `Settings` dataclass, loaded once via `config.get()` (lru_cache). All env vars are read here. Add new settings here only.
 
-**`core/brain.py`** — `BrainService.think_stream(user_input)` builds the Ollama prompt (system prompt + memory recall), streams `/api/chat` token-by-token, and yields complete sentences. Persists the exchange to memory when done. It's a generator — callers iterate over sentences.
+**`core/brain.py`** — `BrainService.think_stream(user_input)` builds the MLX prompt (system prompt + memory recall), streams token-by-token, and yields complete sentences. Persists the exchange to memory when done. It's a generator — callers iterate over sentences.
 
 **`core/memory.py`** — `MemoryStore` wraps SQLite with one table: `conversations`. `recall(query)` does keyword matching over recent rows. DB path respects `~` expansion via `MEMORY_DIR`.
 
@@ -53,7 +52,8 @@ Text loop:  input() → think_stream() → print + speak()
 ## Key Configuration
 
 All settings via `.env` (see `.env.example`):
-- `OLLAMA_MODEL` — default `qwen3.5:9b`
+- `LLM_BACKEND` — `mlx_vlm` (default for Qwen3.5) or `mlx`
+- `MLX_MODEL` — default `mlx-community/Qwen3.5-4B-MLX-4bit`
 - `STT_BACKEND` — `apple` (default) or `whisper`
 - `KOKORO_MODEL` — default `mlx-community/Kokoro-82M-bf16`
 - `KOKORO_VOICE` — default `af_heart` (e.g. `bf_emma`, `bm_george`)
