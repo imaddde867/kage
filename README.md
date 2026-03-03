@@ -14,7 +14,7 @@ A fully local, always-on personal AI for macOS. Wake word activates it, you spea
 | Wake word | [openwakeword](https://github.com/dscripka/openWakeWord) | Lightweight, CPU-only, works offline |
 | STT | macOS native (`SpeechRecognition`) | Hardware-accelerated, zero latency |
 | STT fallback | [faster-whisper](https://github.com/guillaumekleeven/faster-whisper) | CPU-only, no GPU needed |
-| TTS | macOS `say` | Built-in, no deps, Siri-quality neural voices |
+| TTS | [mlx-audio](https://github.com/Blaizzy/mlx-audio) + Kokoro-82M | Local MLX synthesis on Apple Silicon |
 | Memory | SQLite | No server, simple, durable |
 | Audio | [sounddevice](https://python-sounddevice.readthedocs.io) | Clean cross-platform mic access |
 
@@ -33,7 +33,7 @@ pip install -r requirements.txt
 
 # 3. Configure
 cp .env.example .env
-# Edit .env — at minimum set OLLAMA_MODEL and MACOS_SAY_VOICE
+# Edit .env — set your model and Kokoro voice preset
 
 # 4. Pull the model
 ollama pull qwen3.5:9b
@@ -43,10 +43,7 @@ python main.py --text     # text mode (no mic needed)
 python main.py            # voice mode (wake word → speak → respond)
 ```
 
-**List available voices:**
-```bash
-say -v '?'
-```
+**Popular Kokoro voices:** `af_heart` (US), `bf_emma` (UK), `bm_george` (UK)
 
 ---
 
@@ -56,7 +53,10 @@ say -v '?'
 |----------|---------|-------------|
 | `OLLAMA_MODEL` | `qwen3.5:9b` | Model to use |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server |
-| `MACOS_SAY_VOICE` | `Ava (Enhanced)` | TTS voice |
+| `KOKORO_MODEL` | `mlx-community/Kokoro-82M-bf16` | Kokoro model repo |
+| `KOKORO_VOICE` | `af_heart` | Voice preset |
+| `KOKORO_LANG_CODE` | `en-us` | Accent/language (`en-us`, `en-gb`, `ja`, `zh`) |
+| `KOKORO_SPEED` | `1.0` | Speaking rate multiplier |
 | `STT_BACKEND` | `apple` | `apple` or `whisper` |
 | `WAKE_WORD` | `hey jarvis` | Display name |
 | `WAKE_WORD_MODEL` | `hey_jarvis` | openwakeword model file |
@@ -77,7 +77,7 @@ core/
 ├── brain.py     BrainService.think_stream() — Ollama streaming, yields sentences
 ├── listener.py  ListenerService — wake word + record + STT
 ├── memory.py    MemoryStore — SQLite conversations, keyword recall
-└── speaker.py   speak() — macOS say subprocess
+└── speaker.py   speak() — mlx-audio Kokoro synthesis + playback
 
 config.py        Settings dataclass, loaded once via lru_cache
 data/memory/     kage_memory.db (gitignored)

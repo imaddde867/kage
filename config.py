@@ -60,7 +60,10 @@ class Settings:
     whisper_model: str
 
     # TTS
-    say_voice: str
+    kokoro_model: str
+    kokoro_voice: str
+    kokoro_speed: float
+    kokoro_lang_code: str
 
     # Memory
     memory_dir: str
@@ -93,7 +96,10 @@ def get() -> Settings:
         wake_word_threshold=_env_float("WAKE_WORD_THRESHOLD", 0.5),
         stt_backend=_env_str("STT_BACKEND", "apple"),
         whisper_model=_env_str("WHISPER_MODEL", "base"),
-        say_voice=_env_str("MACOS_SAY_VOICE", "Ava (Enhanced)"),
+        kokoro_model=_env_str("KOKORO_MODEL", "mlx-community/Kokoro-82M-bf16"),
+        kokoro_voice=_env_str("KOKORO_VOICE", "af_heart"),
+        kokoro_speed=_env_float("KOKORO_SPEED", 1.0),
+        kokoro_lang_code=_env_str("KOKORO_LANG_CODE", "en-us"),
         memory_dir=_env_str("MEMORY_DIR", "./data/memory"),
         user_name=_env_str("USER_NAME", "Imad"),
         sample_rate=_env_int("SAMPLE_RATE", 16000),

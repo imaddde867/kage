@@ -7,6 +7,9 @@ requests
 # Models: https://huggingface.co/mlx-community
 mlx-lm
 
+# TTS — Kokoro-82M via MLX Audio
+mlx-audio[tts]
+
 # Speech to text — Apple native (fast, hardware-accelerated, no model load)
 SpeechRecognition
 # Speech to text fallback — local Whisper
