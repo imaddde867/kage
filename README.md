@@ -151,6 +151,12 @@ Notes:
 | `HEARTBEAT_INTERVAL_SECONDS` | `300`   | Heartbeat tick interval                                 |
 | `DND_START_HOUR`             | `23`    | Do-not-disturb start hour (24h)                         |
 | `DND_END_HOUR`               | `7`     | Do-not-disturb end hour (24h)                           |
+| `WEB_FETCH_TLS_MODE`         | `strict` | TLS policy for `web_fetch`: `strict` or `allow_insecure_fallback` |
+| `WEB_FETCH_INSECURE_FALLBACK_DOMAINS` | `` | CSV allowlist of trusted domains permitted for insecure fallback |
+| `WEB_FETCH_TLS_RETRY_WITH_CERTIFI` | `true` | Retry SSL failures once using certifi CA bundle before insecure fallback |
+| `CALENDAR_READ_TIMEOUT_SECONDS` | `10` | Per-attempt timeout for `calendar_read` AppleScript call |
+| `CALENDAR_READ_RETRY_COUNT`  | `1`     | Retry count for timeout-only `calendar_read` failures   |
+| `CALENDAR_READ_RETRY_DELAY_SECONDS` | `0.4` | Delay between `calendar_read` timeout retries           |
 
 ## Architecture
 
@@ -195,7 +201,7 @@ Run the test suite:
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Current suite size (as of 2026-03-04): 148 tests.
+Current suite size (as of 2026-03-05): 220 tests.
 
 Useful sanity checks:
 
