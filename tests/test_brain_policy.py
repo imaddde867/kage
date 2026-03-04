@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import unittest
 from collections import deque
+from collections.abc import Iterator
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from core.brain import BrainService, _derive_policy_note
+from core.brain_guardrails import guard_answer_truthfulness
 
 
 class _FakeMemory:
@@ -161,6 +164,130 @@ class BrainPolicyTests(unittest.TestCase):
         )
         system = messages[0]["content"]
         self.assertLessEqual(len(system), 2500)
+
+
+# ---------------------------------------------------------------------------
+# Routing: _needs_tools retry + temperature override
+# ---------------------------------------------------------------------------
+
+class _ScriptedRuntime:
+    """Minimal fake runtime that returns pre-scripted answers for routing tests."""
+
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = list(responses)
+        self._calls: list[dict] = []
+        self._index = 0
+
+    def stream_raw(self, prompt: str, **kwargs: object) -> Iterator[str]:
+        self._calls.append(dict(kwargs))
+        text = self._responses[min(self._index, len(self._responses) - 1)]
+        self._index += 1
+        yield text
+
+
+class TestNeedsToolsRouting(unittest.TestCase):
+    """Verify _needs_tools deterministic routing and retry behaviour.
+
+    Uses a scripted fake runtime so no LLM is needed.
+    """
+
+    def _brain_with_runtime(self, runtime: _ScriptedRuntime) -> BrainService:
+        brain = BrainService.__new__(BrainService)
+        brain._runtime = runtime
+        tok = MagicMock()
+        tok.apply_chat_template = lambda msgs, **kw: " ".join(m["content"] for m in msgs)
+        brain._runtime.tokenizer = tok
+        return brain
+
+    def test_yes_answer_returns_true(self) -> None:
+        """Classifier output starting with 'yes' → _needs_tools returns True."""
+        runtime = _ScriptedRuntime(["yes"])
+        brain = self._brain_with_runtime(runtime)
+        self.assertTrue(brain._needs_tools("What is the Bitcoin price?"))
+
+    def test_no_answer_returns_false(self) -> None:
+        """Classifier output starting with 'no' → _needs_tools returns False."""
+        runtime = _ScriptedRuntime(["no"])
+        brain = self._brain_with_runtime(runtime)
+        self.assertFalse(brain._needs_tools("Who wrote Hamlet?"))
+
+    def test_inconclusive_once_then_yes(self) -> None:
+        """First inconclusive, second 'yes' → returns True (retry works)."""
+        runtime = _ScriptedRuntime(["maybe", "yes"])
+        brain = self._brain_with_runtime(runtime)
+        self.assertTrue(brain._needs_tools("Look something up"))
+
+    def test_inconclusive_twice_defaults_to_tools(self) -> None:
+        """Two inconclusive answers → defaults to True so requests are not dropped."""
+        runtime = _ScriptedRuntime(["???", "hmm"])
+        brain = self._brain_with_runtime(runtime)
+        self.assertTrue(brain._needs_tools("Unclear request"))
+
+    def test_temperature_zero_passed_to_stream_raw(self) -> None:
+        """_needs_tools passes temperature=0.0 to stream_raw for deterministic output."""
+        runtime = _ScriptedRuntime(["yes"])
+        brain = self._brain_with_runtime(runtime)
+        brain._needs_tools("search something")
+        # At least one call must have temperature=0.0
+        temps = [c.get("temperature") for c in runtime._calls]
+        self.assertIn(0.0, temps)
+
+    def test_case_insensitive_yes(self) -> None:
+        """'YES' (uppercase) is correctly interpreted as yes."""
+        runtime = _ScriptedRuntime(["YES please"])
+        brain = self._brain_with_runtime(runtime)
+        self.assertTrue(brain._needs_tools("Fetch something"))
+
+    def test_case_insensitive_no(self) -> None:
+        """'No.' with trailing punctuation is correctly interpreted as no."""
+        runtime = _ScriptedRuntime(["No. This is conversational."])
+        brain = self._brain_with_runtime(runtime)
+        self.assertFalse(brain._needs_tools("What is 2+2?"))
+
+
+# ---------------------------------------------------------------------------
+# Truthfulness guard
+# ---------------------------------------------------------------------------
+
+class TestGuardAnswerTruthfulness(unittest.TestCase):
+    """Verify guard_answer_truthfulness appends disclaimers only when appropriate."""
+
+    def test_web_claim_without_tool_gets_note(self) -> None:
+        """Claiming 'I searched' without web tools adds a training-knowledge note."""
+        answer = "I searched the web and found that Python 3.14 is released."
+        out = guard_answer_truthfulness(answer, set())
+        self.assertIn("Note:", out)
+        self.assertIn("training knowledge", out)
+
+    def test_web_claim_with_web_search_tool_no_note(self) -> None:
+        """When web_search was used, no disclaimer is added."""
+        answer = "I searched the web and found the price is $50,000."
+        out = guard_answer_truthfulness(answer, {"web_search"})
+        self.assertNotIn("Note:", out)
+
+    def test_web_claim_with_web_fetch_tool_no_note(self) -> None:
+        """When web_fetch was used, no disclaimer is added."""
+        answer = "I looked it up online and found the documentation."
+        out = guard_answer_truthfulness(answer, {"web_fetch"})
+        self.assertNotIn("Note:", out)
+
+    def test_calendar_claim_without_tool_gets_note(self) -> None:
+        """Claiming calendar access without calendar_read adds a note."""
+        answer = "I checked your calendar and found no meetings today."
+        out = guard_answer_truthfulness(answer, set())
+        self.assertIn("Note:", out)
+        self.assertIn("calendar", out.lower())
+
+    def test_calendar_claim_with_calendar_tool_no_note(self) -> None:
+        """When calendar_read was used, no disclaimer is added."""
+        answer = "I checked your calendar — no meetings today."
+        out = guard_answer_truthfulness(answer, {"calendar_read"})
+        self.assertNotIn("Note:", out)
+
+    def test_neutral_answer_unchanged(self) -> None:
+        """Answers with no external claims pass through unchanged."""
+        answer = "The Eiffel Tower is in Paris."
+        self.assertEqual(guard_answer_truthfulness(answer, set()), answer)
 
 
 if __name__ == "__main__":

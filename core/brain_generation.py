@@ -82,9 +82,15 @@ class GenerationRuntime:
         print("  Ready.\n", flush=True)
 
     def stream_raw(
-        self, prompt: str, *, max_tokens: int | None = None, track_stats: bool = True
+        self,
+        prompt: str,
+        *,
+        max_tokens: int | None = None,
+        track_stats: bool = True,
+        temperature: float | None = None,
     ) -> Iterator[str]:
         tokens = max_tokens if max_tokens is not None else self.settings.mlx_max_tokens
+        temp = temperature if temperature is not None else self.settings.temperature
         if self.backend == _BACKEND_MLX_VLM:
             gen_iter = iter(
                 self._vlm_stream(
@@ -92,7 +98,7 @@ class GenerationRuntime:
                     self._vlm_processor,
                     prompt=prompt,
                     max_tokens=tokens,
-                    temperature=self.settings.temperature,
+                    temperature=temp,
                 )
             )
         elif self.backend == _BACKEND_MLX:
@@ -103,7 +109,7 @@ class GenerationRuntime:
                     prompt=prompt,
                     max_tokens=tokens,
                     draft_model=self._mlx_draft_model,
-                    temp=self.settings.temperature,
+                    temp=temp,
                 )
             )
         else:

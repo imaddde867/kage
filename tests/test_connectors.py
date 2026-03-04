@@ -30,8 +30,11 @@ from connectors.memory_ops import ListOpenTasksTool, MarkTaskDoneTool, UpdateFac
 from connectors.notify import NotifyTool, SpeakTool, _escape_as
 from connectors.shell import ShellTool
 from connectors.web_search import WebSearchTool
-from connectors.web_fetch import WebFetchTool
-from connectors.apple_calendar import ReminderAddTool, CalendarReadTool, _escape_as as _cal_escape_as
+from connectors.web_fetch import WebFetchTool, _try_parse_json, _is_json_content_type, _is_ssl_error
+from connectors.apple_calendar import (
+    ReminderAddTool, CalendarReadTool, _escape_as as _cal_escape_as,
+    _parse_due_datetime, _due_date_applescript,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -428,13 +431,17 @@ class TestReminderAddTool(unittest.TestCase):
 
     @patch("connectors.apple_calendar._run_osascript")
     def test_due_date_valid(self, mock_run: MagicMock) -> None:
-        """A valid ISO date is converted to 'Month DD, YYYY' format in the AppleScript."""
+        """A valid ISO date triggers AppleScript component setters and result includes timestamp."""
         mock_run.return_value = ("", False)
         result = self.tool.execute(title="Task", due_date="2026-03-15")
         self.assertFalse(result.is_error)
-        self.assertIn("due 2026-03-15", result.content)
+        # Result must include a normalized timestamp (date-only defaults to 09:00)
+        self.assertIn("2026-03-15T09:00", result.content)
         script = mock_run.call_args[0][0]
-        self.assertIn("March 15, 2026", script)
+        # Component setters used (not locale-dependent date string)
+        self.assertIn("set year of d to 2026", script)
+        self.assertIn("set month of d to 3", script)
+        self.assertIn("set day of d to 15", script)
 
     @patch("connectors.apple_calendar._run_osascript")
     def test_due_date_invalid_silently_skipped(self, mock_run: MagicMock) -> None:
@@ -452,6 +459,200 @@ class TestReminderAddTool(unittest.TestCase):
         mock_run.return_value = ("Permission denied", True)
         result = self.tool.execute(title="Task")
         self.assertTrue(result.is_error)
+
+
+# ---------------------------------------------------------------------------
+# Reminder datetime parsing (_parse_due_datetime, _due_date_applescript)
+# ---------------------------------------------------------------------------
+
+class TestReminderDatetimeParsing(unittest.TestCase):
+    """Verify the due date/time parsing helpers handle all supported ISO formats."""
+
+    def test_date_only_defaults_to_0900(self) -> None:
+        """YYYY-MM-DD is parsed and time defaults to 09:00:00."""
+        dt = _parse_due_datetime("2026-03-15")
+        self.assertIsNotNone(dt)
+        assert dt is not None
+        self.assertEqual(dt.year, 2026)
+        self.assertEqual(dt.month, 3)
+        self.assertEqual(dt.day, 15)
+        self.assertEqual(dt.hour, 9)
+        self.assertEqual(dt.minute, 0)
+        self.assertEqual(dt.second, 0)
+
+    def test_datetime_hhmm_parsed(self) -> None:
+        """YYYY-MM-DDTHH:MM is parsed with seconds defaulting to 0."""
+        dt = _parse_due_datetime("2026-03-15T14:30")
+        self.assertIsNotNone(dt)
+        assert dt is not None
+        self.assertEqual(dt.hour, 14)
+        self.assertEqual(dt.minute, 30)
+        self.assertEqual(dt.second, 0)
+
+    def test_datetime_full_parsed(self) -> None:
+        """YYYY-MM-DDTHH:MM:SS is parsed in full."""
+        dt = _parse_due_datetime("2026-03-15T14:30:45")
+        self.assertIsNotNone(dt)
+        assert dt is not None
+        self.assertEqual(dt.second, 45)
+
+    def test_invalid_string_returns_none(self) -> None:
+        """Unparseable strings return None without raising."""
+        self.assertIsNone(_parse_due_datetime("not-a-date"))
+        self.assertIsNone(_parse_due_datetime("tomorrow"))
+        self.assertIsNone(_parse_due_datetime(""))
+
+    def test_applescript_uses_component_setters(self) -> None:
+        """_due_date_applescript uses year/month/day/time setters, not date string literals."""
+        from datetime import datetime
+        dt = datetime(2026, 3, 15, 9, 0, 0)
+        snippet = _due_date_applescript(dt)
+        self.assertIn("set year of d to 2026", snippet)
+        self.assertIn("set month of d to 3", snippet)
+        self.assertIn("set day of d to 15", snippet)
+        self.assertIn("set time of d to 32400", snippet)  # 9*3600
+        self.assertIn("set due date of newReminder to d", snippet)
+        # Must NOT use locale-dependent date string literal
+        self.assertNotIn('date "', snippet)
+
+    @patch("connectors.apple_calendar._run_osascript")
+    def test_datetime_result_contains_normalized_timestamp(self, mock_run: MagicMock) -> None:
+        """Result message contains the normalized ISO timestamp when due_date is valid."""
+        mock_run.return_value = ("", False)
+        result = self.tool.execute(title="Meeting", due_date="2026-03-15T14:30")
+        self.assertFalse(result.is_error)
+        self.assertIn("2026-03-15T14:30", result.content)
+
+    @patch("connectors.apple_calendar._run_osascript")
+    def test_date_only_in_result_uses_0900(self, mock_run: MagicMock) -> None:
+        """Date-only input appears in result as YYYY-MM-DDTHH:MM with 09:00."""
+        mock_run.return_value = ("", False)
+        result = self.tool.execute(title="Task", due_date="2026-04-01")
+        self.assertIn("2026-04-01T09:00", result.content)
+
+    def setUp(self) -> None:
+        self.tool = ReminderAddTool()
+
+
+# ---------------------------------------------------------------------------
+# WebFetchTool — JSON detection helpers
+# ---------------------------------------------------------------------------
+
+class TestWebFetchJsonDetection(unittest.TestCase):
+    """Verify the JSON detection helpers used by WebFetchTool."""
+
+    def test_json_object_parsed(self) -> None:
+        """A valid JSON object body returns pretty-printed JSON."""
+        raw = '{"price": 50000, "currency": "USD"}'
+        parsed = _try_parse_json(raw)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertIn('"price"', parsed)
+
+    def test_json_array_parsed(self) -> None:
+        """A JSON array body is detected and returned."""
+        raw = '[{"id": 1}, {"id": 2}]'
+        parsed = _try_parse_json(raw)
+        self.assertIsNotNone(parsed)
+
+    def test_html_not_detected_as_json(self) -> None:
+        """HTML content is not mistaken for JSON."""
+        self.assertIsNone(_try_parse_json("<html><body>Hello</body></html>"))
+
+    def test_plain_text_not_detected_as_json(self) -> None:
+        """Plain text is not mistaken for JSON."""
+        self.assertIsNone(_try_parse_json("Just some text."))
+
+    def test_broken_json_returns_none(self) -> None:
+        """A body starting with '{' but invalid JSON returns None without raising."""
+        self.assertIsNone(_try_parse_json('{"broken": '))
+
+    def test_json_content_type_detected(self) -> None:
+        """application/json content-type header triggers JSON detection."""
+        headers = {"content-type": "application/json; charset=utf-8"}
+        self.assertTrue(_is_json_content_type(headers))
+
+    def test_html_content_type_not_json(self) -> None:
+        """text/html content-type is not detected as JSON."""
+        headers = {"content-type": "text/html"}
+        self.assertFalse(_is_json_content_type(headers))
+
+    @patch("connectors.web_fetch._ScraplingFetcher", None)
+    @patch("connectors.web_fetch._HTTPX")
+    def test_json_content_type_response_returns_json(self, mock_httpx: MagicMock) -> None:
+        """When server responds with application/json, raw JSON is returned."""
+        http_response = MagicMock()
+        http_response.headers = {"content-type": "application/json"}
+        http_response.text = '{"price": 50000}'
+        http_response.url = "https://api.example.com/price"
+        http_response.raise_for_status.return_value = None
+        mock_httpx.get.return_value = http_response
+
+        tool = WebFetchTool()
+        result = tool.execute(url="https://api.example.com/price")
+        self.assertFalse(result.is_error)
+        self.assertIn('"price"', result.content)
+
+
+# ---------------------------------------------------------------------------
+# WebFetchTool — TLS fallback toggle
+# ---------------------------------------------------------------------------
+
+class TestWebFetchTLSFallback(unittest.TestCase):
+    """Verify TLS fallback behaviour controlled by WEB_FETCH_TLS_MODE config."""
+
+    @patch("connectors.web_fetch._ScraplingFetcher", None)
+    @patch("connectors.web_fetch._HTTPX")
+    @patch("connectors.web_fetch._config")
+    def test_ssl_error_retried_when_mode_allow(
+        self, mock_cfg: MagicMock, mock_httpx: MagicMock
+    ) -> None:
+        """SSL failure triggers insecure retry when TLS mode is allow_insecure_fallback."""
+        mock_cfg.get.return_value.web_fetch_tls_mode = "allow_insecure_fallback"
+
+        ssl_exc = Exception("ssl certificate verify failed")
+        success_response = MagicMock()
+        success_response.headers = {"content-type": "text/html"}
+        success_response.text = "<html><body><p>Insecure page</p></body></html>"
+        success_response.url = "https://self-signed.example.com"
+        success_response.raise_for_status.return_value = None
+
+        # First call raises SSL error; second (verify=False) succeeds
+        mock_httpx.get.side_effect = [ssl_exc, success_response]
+
+        tool = WebFetchTool()
+        result = tool.execute(url="https://self-signed.example.com")
+        self.assertFalse(result.is_error)
+        self.assertIn("TLS verification disabled", result.content)
+        self.assertEqual(mock_httpx.get.call_count, 2)
+        # Second call must have verify=False
+        _, second_kwargs = mock_httpx.get.call_args_list[1]
+        self.assertFalse(second_kwargs.get("verify", True))
+
+    @patch("connectors.web_fetch._ScraplingFetcher", None)
+    @patch("connectors.web_fetch._HTTPX")
+    @patch("connectors.web_fetch._config")
+    def test_ssl_error_not_retried_in_strict_mode(
+        self, mock_cfg: MagicMock, mock_httpx: MagicMock
+    ) -> None:
+        """SSL failure is not retried (only one attempt) when TLS mode is strict."""
+        mock_cfg.get.return_value.web_fetch_tls_mode = "strict"
+
+        ssl_exc = Exception("ssl certificate verify failed")
+        mock_httpx.get.side_effect = ssl_exc
+
+        tool = WebFetchTool()
+        result = tool.execute(url="https://self-signed.example.com")
+        self.assertTrue(result.is_error)
+        self.assertEqual(mock_httpx.get.call_count, 1)
+
+    def test_ssl_error_helper_detects_ssl_messages(self) -> None:
+        """_is_ssl_error returns True for SSL-related exception messages."""
+        self.assertTrue(_is_ssl_error(Exception("ssl certificate verify failed")))
+        self.assertTrue(_is_ssl_error(Exception("TLS handshake error")))
+        self.assertTrue(_is_ssl_error(Exception("certificate has expired")))
+        self.assertFalse(_is_ssl_error(Exception("connection refused")))
+        self.assertFalse(_is_ssl_error(Exception("timeout after 12s")))
 
 
 if __name__ == "__main__":
