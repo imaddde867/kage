@@ -1,4 +1,7 @@
-# Kage (影)
+<h1 align="center">Kage (影)</h1>
+<p align="center">
+  <img src="kage.gif" alt="Kage the black horse" width="420" />
+</p>
 
 Kage is a fully local personal AI for macOS: wake word -> speech -> local reasoning -> spoken response, with persistent memory and optional tool use.
 
