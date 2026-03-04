@@ -1,231 +1,202 @@
 # Kage (影)
 
-A fully local, always-on personal AI for macOS. Wake word activates it, you speak, it responds aloud. No cloud, no subscriptions, no data leaving your machine.
+Kage is a fully local personal AI for macOS: wake word -> speech -> local reasoning -> spoken response, with persistent memory and optional tool use.
 
-**Current state:** functional voice + text loop with persistent second-brain memory. Kage now extracts structured entities (tasks, commitments, profile facts, preferences) from conversation, routes intent before every LLM call, injects relevant context into prompts, and proactively surfaces open items when appropriate — all without extra cloud calls.
+No cloud inference. No subscriptions. Data stays on your machine.
 
----
+## Current State
+
+Kage currently runs three layers:
+
+1. Core assistant loop (voice/text, STT, LLM, TTS).
+2. Second brain (structured entity memory: tasks, commitments, profile facts, preferences).
+3. Agent layer (tool-calling loop with connectors + heartbeat reminders).
 
 ## Stack
 
-| Layer | Tool | Why |
-|-------|------|-----|
-| LLM | [MLX-VLM](https://github.com/Blaizzy/mlx-vlm) / [MLX-LM](https://github.com/ml-explore/mlx-lm) | Fast local inference on Apple Silicon |
-| Wake word | [openwakeword](https://github.com/dscripka/openWakeWord) | Lightweight, CPU-only, works offline |
-| STT | macOS native (`SpeechRecognition`) | Hardware-accelerated, zero latency |
-| STT fallback | [faster-whisper](https://github.com/guillaumekleeven/faster-whisper) | CPU-only, no GPU needed |
-| TTS | [mlx-audio](https://github.com/Blaizzy/mlx-audio) + Kokoro-82M | Local MLX synthesis on Apple Silicon |
-| Memory | SQLite | No server, simple, durable |
-| Audio | [sounddevice](https://python-sounddevice.readthedocs.io) | Clean cross-platform mic access |
-
----
+| Layer        | Tool                                                                                           | Why                                      |
+| ------------ | ---------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| LLM          | [MLX-VLM](https://github.com/Blaizzy/mlx-vlm) / [MLX-LM](https://github.com/ml-explore/mlx-lm) | Fast local inference on Apple Silicon    |
+| Wake word    | [openwakeword](https://github.com/dscripka/openWakeWord)                                       | Lightweight, CPU-only, offline           |
+| STT          | `SpeechRecognition` (Apple backend)                                                            | Native macOS recognition                 |
+| STT fallback | [faster-whisper](https://github.com/guillaumekleeven/faster-whisper)                           | Local fallback                           |
+| TTS          | [mlx-audio](https://github.com/Blaizzy/mlx-audio) + Kokoro-82M                                 | Local speech synthesis                   |
+| Memory       | SQLite                                                                                         | Durable local storage                    |
+| Web tools    | `duckduckgo-search`, `httpx`, `trafilatura`                                                    | Agent web search + page fetch connectors |
 
 ## Setup
 
-**Prerequisites:** Python 3.11 on Apple Silicon.
+Prerequisite: Python 3.11 on Apple Silicon.
 
 ```bash
-# 1. Create environment
-micromamba create -n kage python=3.11 pip -y && micromamba activate kage
+# 1) Create environment
+micromamba create -n kage python=3.11 pip -y
+micromamba activate kage
 
-# 2. Install dependencies
+# 2) Install dependencies (includes connector deps)
 pip install -r requirements.txt
 
-# 3. Configure
+# 3) Configure
 cp .env.example .env
-# Edit .env — set your model and Kokoro voice preset
+# Edit .env as needed
 
-# 4. Run
-python main.py --text     # text mode (no mic needed)
-python main.py            # voice mode (wake word → speak → respond)
+# 4) Run
+python3 main.py --text   # text mode
+python3 main.py          # voice mode
 ```
 
-**Popular Kokoro voices:** `af_heart` (US), `bf_emma` (UK), `bm_george` (UK)
+## Connectors and Tools
 
----
+When `AGENT_ENABLED=true`, the agent can use these tools via `ToolRegistry`:
+
+- `web_search`: DuckDuckGo text search (`duckduckgo-search`)
+- `web_fetch`: fetch URL and extract readable content (`httpx`, `trafilatura`)
+- `shell`: allowlisted local shell commands only
+- `notify`: macOS notification via `osascript`
+- `speak`: direct TTS output
+- `calendar_read`: read upcoming events from macOS Calendar (`osascript`)
+- `reminder_add`: add reminder in macOS Reminders (`osascript`)
+- `mark_task_done`, `update_fact`, `list_open_tasks`: second-brain memory tools
+
+Notes:
+
+- Calendar/Reminders/notifications require macOS and AppleScript permissions.
+- `shell` is restricted to a small allowlist and blocks pipes/redirection/operators.
 
 ## Configuration (`.env`)
 
-### Core
+### Core Inference
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LLM_BACKEND` | `mlx_vlm` | `mlx_vlm` for Qwen3.5, `mlx` for text-only MLX-LM models |
-| `MLX_MODEL` | `mlx-community/Qwen3.5-4B-MLX-4bit` | LLM model repo |
-| `MLX_MAX_TOKENS` | `250` | Max generation length (bumped from 150 to accommodate entity context) |
-| `TEMPERATURE` | `0.3` | Generation temperature; lower = less hallucination |
-| `KOKORO_MODEL` | `mlx-community/Kokoro-82M-bf16` | Kokoro model repo |
-| `KOKORO_VOICE` | `af_heart` | Voice preset |
-| `KOKORO_LANG_CODE` | `en-us` | Accent/language (`en-us`, `en-gb`, `ja`, `zh`) |
-| `KOKORO_SPEED` | `1.0` | Speaking rate multiplier |
-| `STT_BACKEND` | `apple` | `apple` or `whisper` |
-| `WAKE_WORD` | `hey jarvis` | Display name |
-| `WAKE_WORD_MODEL` | `hey_jarvis` | openwakeword model file |
-| `WAKE_WORD_THRESHOLD` | `0.5` | Detection sensitivity (0–1) |
+| Variable          | Default                             | Description                                      |
+| ----------------- | ----------------------------------- | ------------------------------------------------ |
+| `LLM_BACKEND`     | `mlx_vlm`                           | `mlx_vlm` or `mlx`                               |
+| `MLX_MODEL`       | `mlx-community/Qwen3.5-4B-MLX-4bit` | Main model                                       |
+| `MLX_DRAFT_MODEL` | ``                                  | Optional speculative draft model (`mlx` backend) |
+| `MLX_MAX_TOKENS`  | `250`                               | Generation cap                                   |
+| `TEMPERATURE`     | `0.3`                               | Sampling temperature                             |
 
-### Barge-in / Turn-taking
+### Voice / Audio
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ALLOW_BARGE_IN` | `true` | Allow interrupting Kage while it speaks |
-| `INTERRUPT_MIN_SCORE` | `0.55` | Wake score threshold during TTS |
-| `INTERRUPT_HOLD_MS` | `220` | Required speech duration after wake hit |
-| `INTERRUPT_DEBOUNCE_MS` | `500` | Minimum gap between accepted interrupts |
-| `POST_TTS_GUARD_MS` | `250` | Delay before opening mic after TTS stops |
+| Variable              | Default                         | Description              |
+| --------------------- | ------------------------------- | ------------------------ |
+| `WAKE_WORD`           | `hey jarvis`                    | Display wake phrase      |
+| `WAKE_WORD_MODEL`     | `hey_jarvis`                    | openwakeword model name  |
+| `WAKE_WORD_THRESHOLD` | `0.5`                           | Wake detection threshold |
+| `STT_BACKEND`         | `apple`                         | `apple` or `whisper`     |
+| `WHISPER_MODEL`       | `base`                          | Whisper model size       |
+| `KOKORO_MODEL`        | `mlx-community/Kokoro-82M-bf16` | TTS model                |
+| `KOKORO_VOICE`        | `af_heart`                      | Voice preset             |
+| `KOKORO_SPEED`        | `1.0`                           | Speech speed             |
+| `KOKORO_LANG_CODE`    | `en-us`                         | Language/accent          |
 
-### Identity
+### Audio Tuning
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `USER_NAME` | `Imad` | Your name (used in prompts and entity facts) |
-| `ASSISTANT_NAME` | `Kage` | Canonical assistant name kept in text |
-| `TTS_NAME_OVERRIDE_ENABLED` | `true` | Apply spoken-name replacement before TTS |
-| `TTS_NAME_PRONUNCIATION` | `Kah-gay` | Spoken alias to force hard-g pronunciation |
-| `STT_NAME_NORMALIZATION_ENABLED` | `true` | Normalize recognized variants back to canonical name |
-| `STT_NAME_VARIANTS` | `kage,cage,kaj,kaige,kahge,ka-geh` | Comma-separated variants mapped to `ASSISTANT_NAME` |
-| `TEXT_MODE_TTS_ENABLED` | `false` | Speak responses in `--text` mode |
+| Variable               | Default | Description                       |
+| ---------------------- | ------- | --------------------------------- |
+| `SAMPLE_RATE`          | `16000` | Input sample rate                 |
+| `WAKE_WORD_CHUNK_SIZE` | `1280`  | Wake detector chunk size          |
+| `RECORD_CHUNK_SIZE`    | `1024`  | Recording chunk size              |
+| `SILENCE_THRESHOLD`    | `500`   | Silence cutoff                    |
+| `SILENCE_DURATION`     | `1.5`   | Seconds of silence to end capture |
+| `MAX_RECORD_SECONDS`   | `30`    | Max per-turn record duration      |
 
-### Memory
+### Turn Taking / Barge-In
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MEMORY_DIR` | `./data/memory` | SQLite DB location (`~` supported) |
-| `RECENT_TURNS` | `4` | Latest turns injected as short-term chat context |
+| Variable                | Default | Description                              |
+| ----------------------- | ------- | ---------------------------------------- |
+| `ALLOW_BARGE_IN`        | `true`  | Allow interruption while TTS is speaking |
+| `INTERRUPT_MIN_SCORE`   | `0.55`  | Wake score threshold during TTS          |
+| `INTERRUPT_HOLD_MS`     | `220`   | Required speech hold after wake hit      |
+| `INTERRUPT_DEBOUNCE_MS` | `500`   | Minimum gap between interrupts           |
+| `POST_TTS_GUARD_MS`     | `250`   | Guard delay before reopening mic         |
 
-### Second Brain
+### Identity / Text Mode
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SECOND_BRAIN_ENABLED` | `true` | Master switch — `false` gives identical behavior to pre-second-brain |
-| `EXTRACTION_ENABLED` | `true` | Run entity extraction in background thread after each turn |
-| `ENTITY_RECALL_BUDGET` | `400` | Max chars of entity context injected into each prompt |
-| `PROACTIVE_DEBOUNCE_SECONDS` | `60` | Minimum seconds between consecutive proactive suggestions |
+| Variable                         | Default                            | Description                                 |
+| -------------------------------- | ---------------------------------- | ------------------------------------------- |
+| `USER_NAME`                      | `Imad`                             | User name used in prompts                   |
+| `ASSISTANT_NAME`                 | `Kage`                             | Assistant display name                      |
+| `TTS_NAME_OVERRIDE_ENABLED`      | `true`                             | Apply spoken-name replacement               |
+| `TTS_NAME_PRONUNCIATION`         | `Kah-gay`                          | Spoken alias                                |
+| `STT_NAME_NORMALIZATION_ENABLED` | `true`                             | Normalize variants back to `ASSISTANT_NAME` |
+| `STT_NAME_VARIANTS`              | `kage,cage,kaj,kaige,kahge,ka-geh` | Accepted STT variants                       |
+| `TEXT_MODE_TTS_ENABLED`          | `false`                            | Speak responses in `--text` mode            |
 
----
+### Memory / Second Brain
+
+| Variable                     | Default         | Description                                 |
+| ---------------------------- | --------------- | ------------------------------------------- |
+| `MEMORY_DIR`                 | `./data/memory` | SQLite location                             |
+| `RECENT_TURNS`               | `4`             | Recent turn buffer                          |
+| `SECOND_BRAIN_ENABLED`       | `true`          | Master switch for entity memory layer       |
+| `EXTRACTION_ENABLED`         | `true`          | Run entity extraction after each turn       |
+| `ENTITY_RECALL_BUDGET`       | `400`           | Max characters of entity context in prompts |
+| `PROACTIVE_DEBOUNCE_SECONDS` | `60`            | Debounce for proactive suggestions          |
+
+### Agent / Heartbeat
+
+| Variable                     | Default | Description                                             |
+| ---------------------------- | ------- | ------------------------------------------------------- |
+| `AGENT_ENABLED`              | `true`  | Enable tool-using agent loop                            |
+| `AGENT_MAX_STEPS`            | `8`     | Max ReAct iterations per request                        |
+| `HEARTBEAT_ENABLED`          | `true`  | Start background proactive reminder daemon (voice mode) |
+| `HEARTBEAT_INTERVAL_SECONDS` | `300`   | Heartbeat tick interval                                 |
+| `DND_START_HOUR`             | `23`    | Do-not-disturb start hour (24h)                         |
+| `DND_END_HOUR`               | `7`     | Do-not-disturb end hour (24h)                           |
 
 ## Architecture
 
-```
+```text
 main.py
-├── voice mode: ListenerService → BrainService → speak()
-└── text mode:  input()         → BrainService → print (optional speak)
+├── voice mode: ListenerService -> BrainService -> speak()
+└── text mode:  input()         -> BrainService -> print/(optional speak)
 
-core/
-├── audio_coordinator.py   state machine for listen/think/speak + barge-in guards
-├── brain.py               BrainService orchestration:
-│                            update_policy_state → deterministic_response →
-│                            IntentRouter.classify → _build_messages (entity injection) →
-│                            LLM stream → _persist_exchange (background extraction) →
-│                            ProactiveEngine.suggest
-├── brain_generation.py    backend loading + raw token streaming + perf stats
-├── brain_guardrails.py    deterministic policy conflict/safety responses
-├── brain_prompting.py     prompt templates + recent-turn + entity context assembly
-├── listener.py            ListenerService — wake word + record + STT
-├── memory.py              MemoryStore — SQLite conversations + entities schema,
-│                            bounded token-overlap recall
-├── second_brain/
-│   ├── entity_store.py    EntityStore — SQLite CRUD for profile/tasks/commitments/preferences
-│   ├── extractor.py       EntityExtractor — regex extraction, runs in daemon thread
-│   ├── planner.py         IntentRouter — keyword/regex intent classification, no LLM
-│   └── proactive.py       ProactiveEngine — debounced next-action suggestions
-└── speaker.py             speak() — mlx-audio Kokoro synthesis + playback
+BrainService request flow
+1) guardrails state update
+2) if AGENT_ENABLED and classifier says "tools needed":
+     AgentLoop (ReAct XML format) -> ToolRegistry -> connectors
+   else:
+     classic conversational path
+     (intent route -> prompt build -> LLM stream)
+3) persist exchange to SQLite
+4) optional entity extraction (LLMEntityExtractor -> EntityStore)
+5) optional proactive suggestion
 
-config.py        Settings dataclass, loaded once via lru_cache
-data/memory/     kage_memory.db (gitignored)
+Voice mode only
+- HeartbeatAgent daemon wakes every HEARTBEAT_INTERVAL_SECONDS
+- checks DND + audio-idle + debounce
+- speaks due/overdue task reminders
 ```
 
-### Turn control flow
+Key modules:
 
-```
-User input
-  → update_policy_state()          [guardrails state update]
-  → deterministic_response()       [short-circuit if policy conflict triggered]
-  → IntentRouter.classify()        [pure Python, no LLM — assigns intent + flags]
-  → _build_messages()              [injects entity context when route.inject_entities]
-  → LLM stream                     [yields sentences to caller]
-  → _persist_exchange()            [stores to DB; spawns extraction thread if route.should_extract]
-  → ProactiveEngine.suggest()      [appended only when route.proactive_ok, max 1 per turn]
-```
-
-### Intent routing table
-
-| Intent | Example triggers | Injects entities | Extracts | Proactive |
-|--------|-----------------|-----------------|----------|-----------|
-| `TASK_CAPTURE` | "remind me to", "add a task", "I need to" | Yes | Yes | No |
-| `COMMITMENT` | "I have a meeting", "I promised", "I agreed" | Yes | Yes | Yes |
-| `PLANNING_REQUEST` | "what should I", "what's next", "help me plan" | Yes | No | Yes |
-| `RECALL_REQUEST` | "do you remember", "what did I tell you" | Yes | No | No |
-| `PROFILE_UPDATE` | "I live in", "my timezone is" | No | Yes | No |
-| `PREFERENCE` | "I prefer", "I don't like", "I always" | No | Yes | No |
-| `GENERAL` | everything else | No | No | No |
-
-### Entity schema (`entities` table)
-
-```sql
-CREATE TABLE entities (
-    id         TEXT PRIMARY KEY,
-    kind       TEXT NOT NULL,   -- 'profile' | 'task' | 'commitment' | 'preference'
-    key        TEXT NOT NULL,   -- short label (e.g. 'location', task slug)
-    value      TEXT NOT NULL,   -- always text; what gets shown in prompts
-    status     TEXT DEFAULT 'active',  -- 'active' | 'done' | 'cancelled'
-    due_date   TEXT,            -- ISO date or NULL
-    source_id  TEXT,            -- FK to conversations.id
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-```
-
-The entity block injected into prompts looks like:
-
-```
-Known facts about Imad:
-Tasks: review the PR (due 2026-03-04), finish report draft (due 2026-03-07)
-Commitments: team standup (2026-03-05)
-Profile: location=Turku Finland
-Preferences: prefers concise answers
-```
-
-### Proactive suggestions
-
-Proactive suggestions fire only for `COMMITMENT` and `PLANNING_REQUEST` intents, at most once per turn, at most once every `PROACTIVE_DEBOUNCE_SECONDS`, and never if the entity is already mentioned in the reply. They are prefixed `"By the way, ..."` so they read naturally in voice.
-
----
-
-## Development principles
-
-1. **One backend per concern.** No fallback chains. Pick one and make it work.
-2. **No feature until it works end-to-end.** Don't wire up half-built code.
-3. **No abstraction until it's needed 3+ times.** Duplicate twice; abstract on the third.
-4. **Connectors are opt-in plugins, not core.** Calendar/Reminders should not be in the hot path.
-5. **Test before wiring.** If you can't test it in isolation, don't add it.
-6. **Second brain is a master switch.** `SECOND_BRAIN_ENABLED=false` produces identical behavior to the pre-second-brain codebase. All 45 tests pass either way.
-
----
+- `core/brain.py`: orchestration and routing between classic vs agent path
+- `core/agent/loop.py`: multi-step tool loop
+- `core/agent/tool_registry.py`: connector dispatch
+- `connectors/*.py`: individual tool implementations
+- `core/second_brain/entity_store.py`: structured memory persistence
+- `core/second_brain/llm_extractor.py`: LLM-based entity extraction
+- `core/agent/heartbeat.py`: proactive background reminders
 
 ## Testing
 
-See [`TESTING.md`](TESTING.md) for a comprehensive test protocol covering:
-- Entity extraction and memory recall
-- Intent routing edge cases
-- Proactive suggestion behavior
-- Reasoning, logic, and calibration
-- Instruction following and honesty
-- Self-awareness and contradiction traps
-- Coding assistance
-- Context recall across turns
-
-Quick smoke test after setup:
+Run the test suite:
 
 ```bash
-# All 45 unit tests
-python -m unittest discover -s tests -p 'test_*.py'
+python3 -m unittest discover -s tests -p 'test_*.py'
+```
 
-# Verify config loads with new fields
-python -c "import config; s = config.get(); print(s.second_brain_enabled, s.entity_recall_budget)"
+Current suite size (as of 2026-03-04): 143 tests.
 
-# Inspect entity DB after a conversation
+Useful sanity checks:
+
+```bash
+# Verify loaded flags
+python3 -c "import config; s=config.get(); print(s.agent_enabled, s.heartbeat_enabled, s.second_brain_enabled)"
+
+# Inspect entity table
 sqlite3 data/memory/kage_memory.db ".schema entities"
-sqlite3 data/memory/kage_memory.db "SELECT kind, key, value, due_date, status FROM entities;"
+sqlite3 data/memory/kage_memory.db "SELECT kind,key,value,due_date,status FROM entities;"
 ```
 
 ---
@@ -235,18 +206,22 @@ sqlite3 data/memory/kage_memory.db "SELECT kind, key, value, due_date, status FR
 Ordered by value delivered:
 
 - [x] **Second brain entity memory** — tasks, commitments, profile, preferences extracted and recalled
-- [x] **Intent routing** — classify before LLM call; no entity injection on generic queries
-- [x] **Proactive suggestions** — debounced, mention-checked, voice-natural
-- [ ] **Mark done via speech** — "I finished the report" → entity `status=done`
-- [ ] **Better memory recall** — BM25 or embeddings instead of keyword matching
-- [ ] **Streaming STT** — start transcribing while the user is still speaking
-- [ ] **Calendar connector** — read-only, opt-in, only injected when relevant
-- [ ] **Web search** — on-demand via a tool call, not always-on
-- [ ] **Context budgeting** — tune recent-turn and long-term memory token budgets adaptively
-- [ ] **Wake word customization** — train a custom openwakeword model
+- [x] **Intent routing** — classify before LLM call; inject entities only when needed
+- [x] **Proactive suggestions** — debounced, mention-aware reminders
 
----
+Near-term (high confidence):
 
-## What was removed
+- [ ] **Close the loop on tasks** — detect completion phrases ("done", "finished") and call `mark_task_done` reliably, with tests for false positives
+- [ ] **Agent reliability pass** — harden tool-failure handling (timeouts, retries, clear fallback responses) so tool mode is predictable in daily use
+- [ ] **Memory quality before scale** — add entity dedup/merge rules and conflict handling ("new value replaces old value") to keep recall clean
+- [ ] **On-demand external context** — expose web + calendar lookups only when asked, and include lightweight source attribution in responses
 
-KittenTTS, AVSpeech, phonemizer, connectors (calendar/reminders/notes/things), multi-backend TTS switching, streaming session complexity. These added code weight without proportional value at this stage. They can be reintroduced one at a time when the foundation is solid.
+Mid-term (higher effort, still practical):
+
+- [ ] **Streaming STT** — partial transcript while speaking to reduce turn latency and improve interruption handling
+- [ ] **Context budget control** — token-aware budgeting across recent turns, recalled exchanges, and entity context per request
+- [ ] **Recall upgrade path** — introduce BM25 first, then evaluate embeddings only if BM25 quality is insufficient
+
+Later (optional / exploratory):
+
+- [ ] **Wake word customization** — user-trained wake word support once core voice reliability stabilizes

@@ -21,3 +21,8 @@ openwakeword
 
 # Utilities
 python-dotenv
+
+# Agent connectors — web search/fetch tools
+duckduckgo-search
+httpx
+trafilatura
