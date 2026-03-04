@@ -258,12 +258,22 @@ class BrainService:
         routing call fast.
         """
         system = (
-            "You are a routing classifier. Answer with a single word: 'yes' or 'no'.\n"
-            "Output 'yes' if the request requires using external tools such as web search, "
-            "calendar, shell commands, or memory operations.\n"
-            "Also output 'yes' for time-sensitive facts, current events, prices, schedules, "
-            "or whenever browsing would improve reliability.\n"
-            "Output 'no' only if it is a simple conversational question answerable from knowledge alone."
+            "You are a routing classifier. Reply with exactly one word: 'yes' or 'no'.\n\n"
+            "Output 'yes' if the user request requires external tools such as:\n"
+            "  - Web search or fetching URLs\n"
+            "  - Calendar or reminder operations\n"
+            "  - Shell commands or system information\n"
+            "  - Memory write operations (storing facts or tasks)\n"
+            "  - Time-sensitive facts, current events, prices, or live data\n\n"
+            "Output 'no' only for simple conversational questions answerable from knowledge alone.\n\n"
+            "Examples:\n"
+            "  'What is 2+2?' → no\n"
+            "  'Search for the latest Bitcoin price' → yes\n"
+            "  'Add a reminder to call mom tomorrow' → yes\n"
+            "  'What events do I have today?' → yes\n"
+            "  'Who wrote Hamlet?' → no\n"
+            "  'Run ls in my home folder' → yes\n"
+            "  'What is the weather right now?' → yes"
         )
         messages = [
             {"role": "system", "content": system},
@@ -274,19 +284,28 @@ class BrainService:
     def _needs_tools(self, user_input: str) -> bool:
         """Ask the LLM whether this request requires tool use.
 
-        Caps generation at 8 tokens (enough for "yes" or "no" plus any BOS/EOS
-        tokens) to minimise added latency.  track_stats=False avoids overwriting
-        brain.last_stats, which is used by the timing display in main.py.
+        Generates at temperature=0 for deterministic output.  Retries once on
+        ambiguous output (neither 'yes' nor 'no') then defaults to True so
+        explicit tool requests are never silently dropped.
 
-        Returns True when the LLM's answer starts with "yes" (case-insensitive).
-        Any other output (including empty strings) is treated as False so the
-        fast conversational path is used by default.
+        track_stats=False avoids overwriting brain.last_stats used by main.py.
         """
         prompt = self._routing_prompt(user_input)
-        answer = "".join(
-            self._runtime.stream_raw(prompt, max_tokens=8, track_stats=False)
-        ).strip().lower()
-        return answer.startswith("yes")
+        for attempt in range(2):
+            answer = "".join(
+                self._runtime.stream_raw(
+                    prompt, max_tokens=8, track_stats=False, temperature=0.0
+                )
+            ).strip().lower()
+            if answer.startswith("yes"):
+                return True
+            if answer.startswith("no"):
+                return False
+            logger.debug(
+                "Routing attempt %d inconclusive (got %r) — retrying", attempt + 1, answer
+            )
+        logger.debug("Routing inconclusive after retry — defaulting to tools")
+        return True
 
     def agent_stream(self, user_input: str) -> Iterator[str]:
         """Run the agentic multi-step path for a single user request.

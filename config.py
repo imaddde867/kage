@@ -142,6 +142,12 @@ class Settings:
     dnd_start_hour: int             # DND_START_HOUR — 24h hour (0–23) when quiet period begins
     dnd_end_hour: int               # DND_END_HOUR   — 24h hour (0–23) when quiet period ends
 
+    # Web fetch TLS mode — controls SSL certificate verification in web_fetch.
+    # 'strict' (default): refuse connections with invalid/self-signed certificates.
+    # 'allow_insecure_fallback': retry with verify=False on SSL failure and annotate
+    # the result.  Use only when fetching trusted internal URLs with self-signed certs.
+    web_fetch_tls_mode: str         # WEB_FETCH_TLS_MODE — 'strict' or 'allow_insecure_fallback'
+
 
 @lru_cache(maxsize=1)
 def get() -> Settings:
@@ -193,4 +199,5 @@ def get() -> Settings:
         heartbeat_interval_seconds=_env_int("HEARTBEAT_INTERVAL_SECONDS", 300),
         dnd_start_hour=_env_int("DND_START_HOUR", 23),
         dnd_end_hour=_env_int("DND_END_HOUR", 7),
+        web_fetch_tls_mode=_env_str("WEB_FETCH_TLS_MODE", "strict"),
     )

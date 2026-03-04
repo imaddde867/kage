@@ -42,7 +42,9 @@ Extending the loop
 """
 from __future__ import annotations
 
+import json
 import logging
+from collections import Counter
 from collections.abc import Iterator
 from datetime import date
 from typing import Any
@@ -50,6 +52,7 @@ from typing import Any
 import config
 from core.agent.parser import parse_step
 from core.agent.tool_registry import ToolRegistry
+from core.brain_guardrails import guard_answer_truthfulness
 from core.brain_prompting import apply_chat_template
 
 logger = logging.getLogger(__name__)
@@ -83,7 +86,8 @@ Rules:
 - One tool per step
 - Keep answers concise and natural for speech
 - For online research, prefer web_search first, then web_fetch on relevant URLs
-- Include source URLs briefly when reporting fetched web facts
+- When reporting web facts, always cite the source URL in your answer
+- Do not claim to have searched or fetched data unless a tool result supports it
 - If a tool fails, try an alternative or explain the limitation
 - Max {max_steps} steps
 
@@ -226,6 +230,10 @@ class AgentLoop:
         system = self._system_prompt(entity_context=context, max_steps=max_steps)
         # history grows as (assistant_output, observation) pairs each step
         history: list[tuple[str, str]] = []
+        # Track (tool_name, canonical_args) call counts to detect infinite loops
+        tool_call_counts: Counter[tuple[str, str]] = Counter()
+        # Track which tool names were actually invoked (for truthfulness guard)
+        tools_used: set[str] = set()
 
         for step_num in range(max_steps):
             logger.debug("AgentLoop step %d/%d", step_num + 1, max_steps)
@@ -238,7 +246,8 @@ class AgentLoop:
 
             # --- Final answer: yield and exit ---
             if parsed.answer is not None:
-                yield parsed.answer
+                answer = guard_answer_truthfulness(parsed.answer, tools_used)
+                yield answer
                 return
 
             # --- Tool call: execute, record observation, loop again ---
@@ -246,7 +255,24 @@ class AgentLoop:
                 logger.debug(
                     "Tool call: %s(%s)", parsed.tool_call.name, parsed.tool_call.args
                 )
+                # Detect repeated identical calls to break infinite fetch loops.
+                call_key = (
+                    parsed.tool_call.name,
+                    json.dumps(parsed.tool_call.args, sort_keys=True),
+                )
+                tool_call_counts[call_key] += 1
+                if tool_call_counts[call_key] >= 3:
+                    logger.warning(
+                        "Repeated tool call detected (%s x3) — forcing answer", call_key[0]
+                    )
+                    yield (
+                        "I kept retrieving the same data without making progress. "
+                        "I don't have a reliable answer for that right now."
+                    )
+                    return
+
                 result = self._registry.execute(parsed.tool_call)
+                tools_used.add(result.tool_name)
                 logger.debug(
                     "Tool result (error=%s): %s", result.is_error, result.content[:200]
                 )
@@ -262,7 +288,8 @@ class AgentLoop:
             # Some model responses (especially for simple tasks) skip the
             # XML format entirely.  Accept them rather than forcing a retry.
             if raw.strip():
-                yield raw.strip()
+                answer = guard_answer_truthfulness(raw.strip(), tools_used)
+                yield answer
                 return
 
         # Exhausted all steps without a final answer.

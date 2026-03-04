@@ -11,9 +11,12 @@ Install:
 """
 from __future__ import annotations
 
+import json as _json
 import re
+import warnings
 from urllib.parse import urlparse
 
+import config as _config
 from core.agent.tool_base import Tool, ToolResult
 
 try:
@@ -27,7 +30,11 @@ except ImportError:
     _HTTPX = None  # type: ignore[assignment]
 
 try:
-    import trafilatura as _TRAFILATURA  # type: ignore[import]
+    # Suppress noisy lxml / cssselect UserWarnings emitted on import
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        import trafilatura as _TRAFILATURA  # type: ignore[import]
 except ImportError:
     _TRAFILATURA = None  # type: ignore[assignment]
 
@@ -106,6 +113,33 @@ def _extract_text_from_scrapling_response(response: object) -> str:
     return ""
 
 
+def _is_json_content_type(headers: object) -> bool:
+    """Return True when the response Content-Type indicates JSON."""
+    try:
+        ct = str(headers.get("content-type", "")).lower()  # type: ignore[union-attr]
+        return "application/json" in ct or "text/json" in ct
+    except Exception:
+        return False
+
+
+def _try_parse_json(text: str) -> str | None:
+    """If `text` looks like JSON, return a pretty-printed version; otherwise None."""
+    stripped = text.strip()
+    if not stripped or stripped[0] not in ("{", "["):
+        return None
+    try:
+        obj = _json.loads(stripped)
+        return _json.dumps(obj, indent=2, ensure_ascii=False)
+    except Exception:
+        return None
+
+
+def _is_ssl_error(exc: Exception) -> bool:
+    """Return True when the exception message suggests an SSL/TLS failure."""
+    msg = str(exc).lower()
+    return any(k in msg for k in ("ssl", "certificate", "tls", "handshake", "verify"))
+
+
 def _clamp_max_chars(max_chars: int) -> int:
     try:
         requested = int(max_chars)
@@ -135,7 +169,14 @@ class WebFetchTool(Tool):
     }
 
     def execute(self, *, url: str, max_chars: int = _DEFAULT_MAX_CHARS, **kwargs) -> ToolResult:
-        """Fetch the URL and return readable text, truncated to max_chars."""
+        """Fetch the URL and return readable text, truncated to max_chars.
+
+        JSON responses are detected by Content-Type or by attempting to parse
+        the body; when detected, the raw JSON is returned instead of HTML extraction.
+
+        TLS failures trigger a fallback retry with verify=False when
+        WEB_FETCH_TLS_MODE=allow_insecure_fallback; the result is annotated.
+        """
         del kwargs
         normalized_url = _normalize_url(url)
         parsed = urlparse(normalized_url)
@@ -147,6 +188,7 @@ class WebFetchTool(Tool):
             )
 
         limit = _clamp_max_chars(max_chars)
+        tls_mode = _config.get().web_fetch_tls_mode
         attempts: list[str] = []
 
         if _ScraplingFetcher is not None:
@@ -169,23 +211,11 @@ class WebFetchTool(Tool):
             attempts.append('Scrapling fetchers unavailable (install "scrapling[fetchers]").')
 
         if _HTTPX is not None:
-            try:
-                response = _HTTPX.get(
-                    normalized_url,
-                    timeout=_TIMEOUT_SECONDS,
-                    follow_redirects=True,
-                )
-                response.raise_for_status()
-                text = _extract_text_from_html(response.text)
-                if text:
-                    final_url = str(getattr(response, "url", normalized_url))
-                    return ToolResult(
-                        tool_name=self.name,
-                        content=f"URL: {final_url}\n{text[:limit]}",
-                    )
-                attempts.append("HTTP fallback returned no readable content.")
-            except Exception as exc:
-                attempts.append(f"HTTP fallback failed: {exc}")
+            result = self._httpx_fetch(
+                normalized_url, limit=limit, tls_mode=tls_mode, attempts=attempts
+            )
+            if result is not None:
+                return result
         else:
             attempts.append("httpx unavailable.")
 
@@ -198,3 +228,66 @@ class WebFetchTool(Tool):
             ),
             is_error=True,
         )
+
+    def _httpx_fetch(
+        self,
+        url: str,
+        *,
+        limit: int,
+        tls_mode: str,
+        attempts: list[str],
+        insecure: bool = False,
+    ) -> "ToolResult | None":
+        """Attempt one httpx GET and return a ToolResult on success, None on failure.
+
+        When `insecure=True` the request is made with verify=False (TLS fallback
+        path).  Appends failure descriptions to `attempts` so the caller can
+        surface them in a consolidated error message.
+        """
+        try:
+            response = _HTTPX.get(
+                url,
+                timeout=_TIMEOUT_SECONDS,
+                follow_redirects=True,
+                verify=not insecure,
+            )
+            response.raise_for_status()
+            final_url = str(getattr(response, "url", url))
+            annotation = " [TLS verification disabled]" if insecure else ""
+
+            # Prefer raw JSON when Content-Type signals it, or body parses cleanly.
+            if _is_json_content_type(response.headers):
+                json_text = _try_parse_json(response.text) or response.text
+                return ToolResult(
+                    tool_name=self.name,
+                    content=f"URL: {final_url}{annotation}\n{json_text[:limit]}",
+                )
+
+            json_parsed = _try_parse_json(response.text)
+            if json_parsed is not None:
+                return ToolResult(
+                    tool_name=self.name,
+                    content=f"URL: {final_url}{annotation}\n{json_parsed[:limit]}",
+                )
+
+            text = _extract_text_from_html(response.text)
+            if text:
+                return ToolResult(
+                    tool_name=self.name,
+                    content=f"URL: {final_url}{annotation}\n{text[:limit]}",
+                )
+            attempts.append("HTTP fallback returned no readable content.")
+            return None
+
+        except Exception as exc:
+            if (
+                not insecure
+                and tls_mode == "allow_insecure_fallback"
+                and _is_ssl_error(exc)
+            ):
+                attempts.append(f"HTTP fetch SSL error ({exc}) — retrying without verification")
+                return self._httpx_fetch(
+                    url, limit=limit, tls_mode=tls_mode, attempts=attempts, insecure=True
+                )
+            attempts.append(f"HTTP fallback failed: {exc}")
+            return None

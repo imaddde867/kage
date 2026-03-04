@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Set as AbstractSet
 
 _HONESTY_RE = re.compile(r"\balways be honest\b|\bstraight with me\b", re.IGNORECASE)
 _ALWAYS_YES_RE = re.compile(
@@ -87,4 +88,52 @@ def deterministic_response(
         )
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Truthfulness guard
+# ---------------------------------------------------------------------------
+
+_WEB_CLAIM_RE = re.compile(
+    r"\b(I searched|searched the web|I looked (it |that )?up|I found online|"
+    r"according to (my )?search|based on (my )?search|I fetched|I retrieved from the web)\b",
+    re.IGNORECASE,
+)
+_WEB_TOOLS = frozenset({"web_search", "web_fetch"})
+
+_CALENDAR_CLAIM_RE = re.compile(
+    r"\b(I checked (your |the )?calendar|according to (your |the )?calendar|"
+    r"I found (in |on )?your calendar)\b",
+    re.IGNORECASE,
+)
+_CALENDAR_TOOLS = frozenset({"calendar_read", "reminder_add"})
+
+
+def guard_answer_truthfulness(answer: str, tools_used: AbstractSet[str]) -> str:
+    """Append a sourcing note when the answer claims external lookups without tool evidence.
+
+    Called by AgentLoop after extracting a final <answer>.  If the answer text
+    claims a web search or calendar check was performed but neither tool was
+    actually invoked in this loop run, a brief disclaimer is appended so the
+    user knows the response is based on training knowledge, not live data.
+
+    Args:
+        answer:     The final answer string from the agent.
+        tools_used: Set of tool names actually called during this loop run.
+
+    Returns:
+        The original answer, or the answer with a disclaimer appended.
+    """
+    notes: list[str] = []
+    if _WEB_CLAIM_RE.search(answer) and not (tools_used & _WEB_TOOLS):
+        notes.append(
+            "(Note: no live web search was performed — this answer is from training knowledge.)"
+        )
+    if _CALENDAR_CLAIM_RE.search(answer) and not (tools_used & _CALENDAR_TOOLS):
+        notes.append(
+            "(Note: no calendar data was accessed — this answer is from training knowledge.)"
+        )
+    if notes:
+        return answer.rstrip() + "\n\n" + " ".join(notes)
+    return answer
 
