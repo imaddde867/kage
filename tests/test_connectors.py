@@ -4,6 +4,7 @@ All external side-effects are patched:
     subprocess.run        → mocked for NotifyTool / osascript calls
     core.speaker.speak    → mocked for SpeakTool
     connectors.web_search._DDGS → mocked for WebSearchTool
+    connectors.web_fetch._ScraplingFetcher / _HTTPX → mocked for WebFetchTool
     _run_osascript        → mocked for ReminderAddTool / CalendarReadTool
 
 Real I/O is only used by ShellTool (allowlisted commands like date/pwd/echo)
@@ -15,6 +16,7 @@ Test classes:
     TestSpeakTool          — TTS via core.speaker.speak()
     TestShellTool          — allowlist + metachar security layers (real subprocess)
     TestWebSearchTool      — DuckDuckGo search with mocked _DDGS
+    TestWebFetchTool       — Scrapling-first fetch with mocked fallback paths
     TestMemoryOpTools      — mark_task_done, update_fact, list_open_tasks
     TestReminderAddTool    — AppleScript safety: quote escaping + date handling
 """
@@ -28,6 +30,7 @@ from connectors.memory_ops import ListOpenTasksTool, MarkTaskDoneTool, UpdateFac
 from connectors.notify import NotifyTool, SpeakTool, _escape_as
 from connectors.shell import ShellTool
 from connectors.web_search import WebSearchTool
+from connectors.web_fetch import WebFetchTool
 from connectors.apple_calendar import ReminderAddTool, CalendarReadTool, _escape_as as _cal_escape_as
 
 
@@ -218,15 +221,17 @@ class TestWebSearchTool(unittest.TestCase):
 
     @patch("connectors.web_search._DDGS")
     def test_returns_results(self, mock_ddgs_cls: MagicMock) -> None:
-        """Search results are formatted as '- title: body' lines in the content."""
+        """Search results include title, URL, and snippet blocks."""
         mock_ddgs_cls.return_value.text.return_value = [
-            {"title": "Python 3.13", "body": "Released in October 2024."},
+            {"title": "Python 3.13", "body": "Released in October 2024.", "href": "https://python.org"},
             {"title": "Release notes", "body": "Various improvements."},
         ]
         result = self.tool.execute(query="Python 3.13 release")
         self.assertFalse(result.is_error)
         self.assertIn("Python 3.13", result.content)
+        self.assertIn("https://python.org", result.content)
         self.assertIn("Released in October", result.content)
+        mock_ddgs_cls.return_value.text.assert_called_once_with("Python 3.13 release", max_results=5)
 
     @patch("connectors.web_search._DDGS")
     def test_no_results(self, mock_ddgs_cls: MagicMock) -> None:
@@ -244,12 +249,74 @@ class TestWebSearchTool(unittest.TestCase):
         self.assertTrue(result.is_error)
         self.assertIn("Search failed", result.content)
 
+    @patch("connectors.web_search._DDGS")
+    def test_max_results_clamped(self, mock_ddgs_cls: MagicMock) -> None:
+        """max_results is clamped so huge values don't explode request cost."""
+        mock_ddgs_cls.return_value.text.return_value = []
+        self.tool.execute(query="anything", max_results=999)
+        mock_ddgs_cls.return_value.text.assert_called_once_with("anything", max_results=10)
+
     @patch("connectors.web_search._DDGS", None)
     def test_missing_ddgs_import(self) -> None:
         """When duckduckgo-search is not installed, _DDGS is None → error with install hint."""
         result = self.tool.execute(query="test")
         self.assertTrue(result.is_error)
         self.assertIn("duckduckgo-search", result.content)
+
+
+# ---------------------------------------------------------------------------
+# WebFetchTool (Scrapling-first with fallback)
+# ---------------------------------------------------------------------------
+
+class TestWebFetchTool(unittest.TestCase):
+    """Verify WebFetchTool uses Scrapling first and falls back safely."""
+
+    def setUp(self) -> None:
+        self.tool = WebFetchTool()
+
+    @patch("connectors.web_fetch._ScraplingFetcher")
+    def test_scrapling_success(self, mock_fetcher: MagicMock) -> None:
+        """Readable text is returned when Scrapling succeeds."""
+        fake_response = MagicMock()
+        fake_response.body = b"<html><body><h1>Hello</h1><p>world</p></body></html>"
+        mock_fetcher.get.return_value = fake_response
+
+        result = self.tool.execute(url="https://example.com")
+        self.assertFalse(result.is_error)
+        self.assertIn("URL: https://example.com", result.content)
+        self.assertIn("Hello", result.content)
+        self.assertIn("world", result.content)
+        mock_fetcher.get.assert_called_once()
+
+    @patch("connectors.web_fetch._HTTPX")
+    @patch("connectors.web_fetch._ScraplingFetcher")
+    def test_fallback_to_httpx(self, mock_fetcher: MagicMock, mock_httpx: MagicMock) -> None:
+        """When Scrapling fails, HTTP fallback still returns content."""
+        mock_fetcher.get.side_effect = RuntimeError("blocked")
+        http_response = MagicMock()
+        http_response.text = "<html><body><p>Fallback content</p></body></html>"
+        http_response.url = "https://example.com/final"
+        http_response.raise_for_status.return_value = None
+        mock_httpx.get.return_value = http_response
+
+        result = self.tool.execute(url="https://example.com")
+        self.assertFalse(result.is_error)
+        self.assertIn("Fallback content", result.content)
+        self.assertIn("https://example.com/final", result.content)
+
+    def test_invalid_url(self) -> None:
+        """Invalid URLs are rejected early with a clear error."""
+        result = self.tool.execute(url="not-a-url")
+        self.assertTrue(result.is_error)
+        self.assertIn("Invalid URL", result.content)
+
+    @patch("connectors.web_fetch._HTTPX", None)
+    @patch("connectors.web_fetch._ScraplingFetcher", None)
+    def test_missing_fetchers(self) -> None:
+        """Missing Scrapling and HTTP fallback returns install guidance."""
+        result = self.tool.execute(url="https://example.com")
+        self.assertTrue(result.is_error)
+        self.assertIn("scrapling[fetchers]", result.content)
 
 
 # ---------------------------------------------------------------------------
