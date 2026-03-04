@@ -127,6 +127,10 @@ class Settings:
     # all others continue on the existing fast conversational path unchanged.
     agent_enabled: bool             # AGENT_ENABLED — master switch; False disables all tool use
     agent_max_steps: int            # AGENT_MAX_STEPS — hard cap on ReAct iterations per request
+    agent_temperature: float        # AGENT_TEMPERATURE — sampling temperature for tool-mode generations
+    agent_entity_mode: str          # AGENT_ENTITY_MODE — personal_only | relevance_filtered | full
+    agent_history_char_budget: int  # AGENT_HISTORY_CHAR_BUDGET — max chars retained in loop history
+    agent_observation_max_chars: int # AGENT_OBSERVATION_MAX_CHARS — per-observation compression cap
 
     # Heartbeat — proactive background daemon (core/agent/heartbeat.py).
     # A daemon thread wakes every heartbeat_interval_seconds, scans EntityStore for
@@ -195,6 +199,10 @@ def get() -> Settings:
         extraction_enabled=_env_bool("EXTRACTION_ENABLED", True),
         agent_enabled=_env_bool("AGENT_ENABLED", True),
         agent_max_steps=_env_int("AGENT_MAX_STEPS", 8),
+        agent_temperature=_env_float("AGENT_TEMPERATURE", 0.0),
+        agent_entity_mode=_env_str("AGENT_ENTITY_MODE", "relevance_filtered"),
+        agent_history_char_budget=max(1000, _env_int("AGENT_HISTORY_CHAR_BUDGET", 8000)),
+        agent_observation_max_chars=max(500, _env_int("AGENT_OBSERVATION_MAX_CHARS", 1800)),
         heartbeat_enabled=_env_bool("HEARTBEAT_ENABLED", True),
         heartbeat_interval_seconds=_env_int("HEARTBEAT_INTERVAL_SECONDS", 300),
         dnd_start_hour=_env_int("DND_START_HOUR", 23),

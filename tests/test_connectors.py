@@ -20,6 +20,7 @@ Test classes:
     TestMemoryOpTools      — mark_task_done, update_fact, list_open_tasks
     TestReminderAddTool    — AppleScript safety: quote escaping + date handling
 """
+import json
 import subprocess
 import tempfile
 import unittest
@@ -224,25 +225,29 @@ class TestWebSearchTool(unittest.TestCase):
 
     @patch("connectors.web_search._DDGS")
     def test_returns_results(self, mock_ddgs_cls: MagicMock) -> None:
-        """Search results include title, URL, and snippet blocks."""
+        """Search results are returned as compact structured JSON."""
         mock_ddgs_cls.return_value.text.return_value = [
             {"title": "Python 3.13", "body": "Released in October 2024.", "href": "https://python.org"},
             {"title": "Release notes", "body": "Various improvements."},
         ]
         result = self.tool.execute(query="Python 3.13 release")
         self.assertFalse(result.is_error)
-        self.assertIn("Python 3.13", result.content)
-        self.assertIn("https://python.org", result.content)
-        self.assertIn("Released in October", result.content)
+        payload = json.loads(result.content)
+        self.assertEqual(payload["query"], "Python 3.13 release")
+        self.assertEqual(len(payload["results"]), 1)
+        self.assertEqual(payload["results"][0]["url"], "https://python.org")
+        self.assertIn("Python 3.13", payload["results"][0]["title"])
         mock_ddgs_cls.return_value.text.assert_called_once_with("Python 3.13 release", max_results=5)
 
     @patch("connectors.web_search._DDGS")
     def test_no_results(self, mock_ddgs_cls: MagicMock) -> None:
-        """An empty result list returns a 'No results' message (not an error)."""
+        """An empty result list returns an empty structured result payload."""
         mock_ddgs_cls.return_value.text.return_value = []
         result = self.tool.execute(query="xyzzy nothing here")
         self.assertFalse(result.is_error)
-        self.assertIn("No results", result.content)
+        payload = json.loads(result.content)
+        self.assertEqual(payload["query"], "xyzzy nothing here")
+        self.assertEqual(payload["results"], [])
 
     @patch("connectors.web_search._DDGS")
     def test_search_error(self, mock_ddgs_cls: MagicMock) -> None:
@@ -259,12 +264,23 @@ class TestWebSearchTool(unittest.TestCase):
         self.tool.execute(query="anything", max_results=999)
         mock_ddgs_cls.return_value.text.assert_called_once_with("anything", max_results=10)
 
+    @patch("connectors.web_search._DDGS")
+    def test_output_is_size_capped(self, mock_ddgs_cls: MagicMock) -> None:
+        long_snippet = "A" * 2000
+        mock_ddgs_cls.return_value.text.return_value = [
+            {"title": f"Result {idx}", "body": long_snippet, "href": f"https://example.com/{idx}"}
+            for idx in range(1, 12)
+        ]
+        result = self.tool.execute(query="long query", max_results=10)
+        self.assertFalse(result.is_error)
+        self.assertLessEqual(len(result.content), 2500)
+
     @patch("connectors.web_search._DDGS", None)
     def test_missing_ddgs_import(self) -> None:
         """When duckduckgo-search is not installed, _DDGS is None → error with install hint."""
         result = self.tool.execute(query="test")
         self.assertTrue(result.is_error)
-        self.assertIn("duckduckgo-search", result.content)
+        self.assertIn("ddgs", result.content.lower())
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +306,41 @@ class TestWebFetchTool(unittest.TestCase):
         self.assertIn("Hello", result.content)
         self.assertIn("world", result.content)
         mock_fetcher.get.assert_called_once()
+
+    @patch("connectors.web_fetch._ScraplingFetcher")
+    def test_scrapling_status_blocked_returns_error(self, mock_fetcher: MagicMock) -> None:
+        fake_response = MagicMock()
+        fake_response.status_code = 403
+        fake_response.url = "https://example.com/challenge"
+        fake_response.body = b"<html><body>Forbidden</body></html>"
+        mock_fetcher.get.return_value = fake_response
+
+        result = self.tool.execute(url="https://example.com")
+        self.assertTrue(result.is_error)
+        self.assertIn("anti-bot", result.content.lower())
+        self.assertIn("403", result.content)
+
+    @patch("connectors.web_fetch._ScraplingFetcher")
+    def test_scrapling_js_challenge_returns_error(self, mock_fetcher: MagicMock) -> None:
+        fake_response = MagicMock()
+        fake_response.url = "https://example.com/challenge"
+        fake_response.body = b"<html><body>Please enable JavaScript to continue.</body></html>"
+        mock_fetcher.get.return_value = fake_response
+
+        result = self.tool.execute(url="https://example.com")
+        self.assertTrue(result.is_error)
+        self.assertIn("anti-bot", result.content.lower())
+
+    @patch("connectors.web_fetch._ScraplingFetcher")
+    def test_unsupported_region_url_returns_error(self, mock_fetcher: MagicMock) -> None:
+        fake_response = MagicMock()
+        fake_response.url = "https://eu.usatoday.com/unsupported-eu/"
+        fake_response.body = b"<html><body>Some generic content</body></html>"
+        mock_fetcher.get.return_value = fake_response
+
+        result = self.tool.execute(url="https://eu.usatoday.com/unsupported-eu/")
+        self.assertTrue(result.is_error)
+        self.assertIn("blocked", result.content.lower())
 
     @patch("connectors.web_fetch._HTTPX")
     @patch("connectors.web_fetch._ScraplingFetcher")
