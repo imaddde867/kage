@@ -25,7 +25,7 @@ Kage currently runs three layers:
 | STT fallback | [faster-whisper](https://github.com/guillaumekleeven/faster-whisper)                           | Local fallback                           |
 | TTS          | [mlx-audio](https://github.com/Blaizzy/mlx-audio) + Kokoro-82M                                 | Local speech synthesis                   |
 | Memory       | SQLite                                                                                         | Durable local storage                    |
-| Web tools    | `duckduckgo-search`, `httpx`, `trafilatura`                                                    | Agent web search + page fetch connectors |
+| Web tools    | `duckduckgo-search`, `scrapling[fetchers]`, `httpx`, `trafilatura`                             | Agent web search + adaptive page fetch    |
 
 ## Setup
 
@@ -52,8 +52,8 @@ python3 main.py          # voice mode
 
 When `AGENT_ENABLED=true`, the agent can use these tools via `ToolRegistry`:
 
-- `web_search`: DuckDuckGo text search (`duckduckgo-search`)
-- `web_fetch`: fetch URL and extract readable content (`httpx`, `trafilatura`)
+- `web_search`: DuckDuckGo text search with source URLs (`duckduckgo-search`)
+- `web_fetch`: Scrapling-first URL fetch + readable extraction with safe fallback (`scrapling[fetchers]`, `httpx`, `trafilatura`)
 - `shell`: allowlisted local shell commands only
 - `notify`: macOS notification via `osascript`
 - `speak`: direct TTS output
@@ -65,6 +65,7 @@ Notes:
 
 - Calendar/Reminders/notifications require macOS and AppleScript permissions.
 - `shell` is restricted to a small allowlist and blocks pipes/redirection/operators.
+- `web_fetch` prefers Scrapling fetchers and falls back to `httpx` if needed.
 
 ## Configuration (`.env`)
 
@@ -189,7 +190,7 @@ Run the test suite:
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Current suite size (as of 2026-03-04): 143 tests.
+Current suite size (as of 2026-03-04): 148 tests.
 
 Useful sanity checks:
 

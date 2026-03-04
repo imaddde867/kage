@@ -24,5 +24,6 @@ python-dotenv
 
 # Agent connectors — web search/fetch tools
 duckduckgo-search
+scrapling[fetchers]
 httpx
 trafilatura
