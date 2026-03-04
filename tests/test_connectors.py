@@ -31,7 +31,13 @@ from connectors.memory_ops import ListOpenTasksTool, MarkTaskDoneTool, UpdateFac
 from connectors.notify import NotifyTool, SpeakTool, _escape_as
 from connectors.shell import ShellTool
 from connectors.web_search import WebSearchTool
-from connectors.web_fetch import WebFetchTool, _try_parse_json, _is_json_content_type, _is_ssl_error
+from connectors.web_fetch import (
+    WebFetchTool,
+    _try_parse_json,
+    _is_json_content_type,
+    _is_ssl_error,
+    _is_domain_allowlisted,
+)
 from connectors.apple_calendar import (
     ReminderAddTool, CalendarReadTool, _escape_as as _cal_escape_as,
     _parse_due_datetime, _due_date_applescript,
@@ -513,6 +519,90 @@ class TestReminderAddTool(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# CalendarReadTool (retry-on-timeout behavior)
+# ---------------------------------------------------------------------------
+
+class TestCalendarReadTool(unittest.TestCase):
+    """Verify CalendarReadTool retries timeout failures once and reports cleanly."""
+
+    def setUp(self) -> None:
+        self.tool = CalendarReadTool()
+
+    @patch("connectors.apple_calendar._run_osascript")
+    @patch("connectors.apple_calendar._config")
+    def test_success_first_attempt(self, mock_cfg: MagicMock, mock_run: MagicMock) -> None:
+        mock_cfg.get.return_value = MagicMock(
+            calendar_read_timeout_seconds=7,
+            calendar_read_retry_count=1,
+            calendar_read_retry_delay_seconds=0.0,
+        )
+        mock_run.return_value = ("Standup at Thursday 10:00", False)
+
+        result = self.tool.execute(days=2)
+        self.assertFalse(result.is_error)
+        self.assertIn("Standup", result.content)
+        self.assertEqual(mock_run.call_count, 1)
+        self.assertEqual(mock_run.call_args.kwargs.get("timeout"), 7)
+
+    @patch("connectors.apple_calendar._run_osascript")
+    @patch("connectors.apple_calendar._config")
+    def test_timeout_then_success_retries_once(
+        self, mock_cfg: MagicMock, mock_run: MagicMock
+    ) -> None:
+        mock_cfg.get.return_value = MagicMock(
+            calendar_read_timeout_seconds=10,
+            calendar_read_retry_count=1,
+            calendar_read_retry_delay_seconds=0.0,
+        )
+        mock_run.side_effect = [
+            ("osascript timed out.", True),
+            ("Planning review at Friday 09:00", False),
+        ]
+
+        result = self.tool.execute(days=3)
+        self.assertFalse(result.is_error)
+        self.assertIn("Planning review", result.content)
+        self.assertEqual(mock_run.call_count, 2)
+
+    @patch("connectors.apple_calendar._run_osascript")
+    @patch("connectors.apple_calendar._config")
+    def test_timeout_retries_exhausted_returns_deterministic_error(
+        self, mock_cfg: MagicMock, mock_run: MagicMock
+    ) -> None:
+        mock_cfg.get.return_value = MagicMock(
+            calendar_read_timeout_seconds=10,
+            calendar_read_retry_count=1,
+            calendar_read_retry_delay_seconds=0.0,
+        )
+        mock_run.side_effect = [
+            ("osascript timed out.", True),
+            ("osascript timed out.", True),
+        ]
+
+        result = self.tool.execute(days=1)
+        self.assertTrue(result.is_error)
+        self.assertIn("timed out after 2 attempts", result.content.lower())
+        self.assertEqual(mock_run.call_count, 2)
+
+    @patch("connectors.apple_calendar._run_osascript")
+    @patch("connectors.apple_calendar._config")
+    def test_non_timeout_error_does_not_retry(
+        self, mock_cfg: MagicMock, mock_run: MagicMock
+    ) -> None:
+        mock_cfg.get.return_value = MagicMock(
+            calendar_read_timeout_seconds=10,
+            calendar_read_retry_count=3,
+            calendar_read_retry_delay_seconds=0.0,
+        )
+        mock_run.return_value = ("Permission denied", True)
+
+        result = self.tool.execute(days=1)
+        self.assertTrue(result.is_error)
+        self.assertIn("Permission denied", result.content)
+        self.assertEqual(mock_run.call_count, 1)
+
+
+# ---------------------------------------------------------------------------
 # Reminder datetime parsing (_parse_due_datetime, _due_date_applescript)
 # ---------------------------------------------------------------------------
 
@@ -660,6 +750,10 @@ class TestWebFetchTLSFallback(unittest.TestCase):
     ) -> None:
         """SSL failure triggers insecure retry when TLS mode is allow_insecure_fallback."""
         mock_cfg.get.return_value.web_fetch_tls_mode = "allow_insecure_fallback"
+        mock_cfg.get.return_value.web_fetch_insecure_fallback_domains = (
+            "self-signed.example.com",
+        )
+        mock_cfg.get.return_value.web_fetch_tls_retry_with_certifi = False
 
         ssl_exc = Exception("ssl certificate verify failed")
         success_response = MagicMock()
@@ -682,12 +776,62 @@ class TestWebFetchTLSFallback(unittest.TestCase):
 
     @patch("connectors.web_fetch._ScraplingFetcher", None)
     @patch("connectors.web_fetch._HTTPX")
+    @patch("connectors.web_fetch._CERTIFI")
+    @patch("connectors.web_fetch._config")
+    def test_ssl_error_retried_with_certifi_in_strict_mode(
+        self,
+        mock_cfg: MagicMock,
+        mock_certifi: MagicMock,
+        mock_httpx: MagicMock,
+    ) -> None:
+        mock_cfg.get.return_value.web_fetch_tls_mode = "strict"
+        mock_cfg.get.return_value.web_fetch_insecure_fallback_domains = ()
+        mock_cfg.get.return_value.web_fetch_tls_retry_with_certifi = True
+        mock_certifi.where.return_value = "/tmp/certifi.pem"
+
+        ssl_exc = Exception("ssl certificate verify failed")
+        success_response = MagicMock()
+        success_response.headers = {"content-type": "text/html"}
+        success_response.text = "<html><body><p>Secure retry page</p></body></html>"
+        success_response.url = "https://secure.example.com"
+        success_response.raise_for_status.return_value = None
+        mock_httpx.get.side_effect = [ssl_exc, success_response]
+
+        tool = WebFetchTool()
+        result = tool.execute(url="https://secure.example.com")
+        self.assertFalse(result.is_error)
+        self.assertIn("CA bundle: certifi", result.content)
+        self.assertEqual(mock_httpx.get.call_count, 2)
+        _, second_kwargs = mock_httpx.get.call_args_list[1]
+        self.assertEqual(second_kwargs.get("verify"), "/tmp/certifi.pem")
+
+    @patch("connectors.web_fetch._ScraplingFetcher", None)
+    @patch("connectors.web_fetch._HTTPX")
+    @patch("connectors.web_fetch._config")
+    def test_ssl_error_allow_mode_not_allowlisted_blocks_insecure_fallback(
+        self, mock_cfg: MagicMock, mock_httpx: MagicMock
+    ) -> None:
+        mock_cfg.get.return_value.web_fetch_tls_mode = "allow_insecure_fallback"
+        mock_cfg.get.return_value.web_fetch_insecure_fallback_domains = ()
+        mock_cfg.get.return_value.web_fetch_tls_retry_with_certifi = False
+        mock_httpx.get.side_effect = Exception("ssl certificate verify failed")
+
+        tool = WebFetchTool()
+        result = tool.execute(url="https://not-allowlisted.example.com")
+        self.assertTrue(result.is_error)
+        self.assertEqual(mock_httpx.get.call_count, 1)
+        self.assertIn("WEB_FETCH_INSECURE_FALLBACK_DOMAINS", result.content)
+
+    @patch("connectors.web_fetch._ScraplingFetcher", None)
+    @patch("connectors.web_fetch._HTTPX")
     @patch("connectors.web_fetch._config")
     def test_ssl_error_not_retried_in_strict_mode(
         self, mock_cfg: MagicMock, mock_httpx: MagicMock
     ) -> None:
         """SSL failure is not retried (only one attempt) when TLS mode is strict."""
         mock_cfg.get.return_value.web_fetch_tls_mode = "strict"
+        mock_cfg.get.return_value.web_fetch_insecure_fallback_domains = ()
+        mock_cfg.get.return_value.web_fetch_tls_retry_with_certifi = False
 
         ssl_exc = Exception("ssl certificate verify failed")
         mock_httpx.get.side_effect = ssl_exc
@@ -704,6 +848,13 @@ class TestWebFetchTLSFallback(unittest.TestCase):
         self.assertTrue(_is_ssl_error(Exception("certificate has expired")))
         self.assertFalse(_is_ssl_error(Exception("connection refused")))
         self.assertFalse(_is_ssl_error(Exception("timeout after 12s")))
+
+    def test_domain_allowlist_supports_subdomains(self) -> None:
+        self.assertTrue(
+            _is_domain_allowlisted("https://docs.example.com/page", ("example.com",))
+        )
+        self.assertTrue(_is_domain_allowlisted("https://example.com", ("example.com",)))
+        self.assertFalse(_is_domain_allowlisted("https://evil-example.com", ("example.com",)))
 
 
 if __name__ == "__main__":

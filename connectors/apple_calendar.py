@@ -28,8 +28,10 @@ only the integer `days` parameter is interpolated, cast to int() first.
 from __future__ import annotations
 
 import subprocess
+import time
 from datetime import date, datetime
 
+import config as _config
 from core.agent.tool_base import Tool, ToolResult
 
 
@@ -78,6 +80,29 @@ def _run_osascript(script: str, timeout: int = 10) -> tuple[str, bool]:
         return "osascript timed out.", True
 
 
+def _run_osascript_with_retry(
+    script: str,
+    *,
+    timeout: int,
+    retry_count: int,
+    retry_delay: float,
+) -> tuple[str, bool, int]:
+    """Execute osascript and retry timeout failures up to retry_count times."""
+    attempts = max(0, int(retry_count)) + 1
+    delay = max(0.0, float(retry_delay))
+    last_output = ""
+    for index in range(attempts):
+        output, is_error = _run_osascript(script, timeout=timeout)
+        last_output = output
+        if not is_error:
+            return output, False, index + 1
+        if "timed out" not in output.lower():
+            return output, True, index + 1
+        if index < attempts - 1 and delay > 0:
+            time.sleep(delay)
+    return last_output, True, attempts
+
+
 class CalendarReadTool(Tool):
     """Return upcoming Calendar events for the next N days.
 
@@ -124,8 +149,22 @@ tell application "Calendar"
     return resultText
 end tell
 """
-        output, is_error = _run_osascript(script)
+        settings = _config.get()
+        timeout = max(1, int(getattr(settings, "calendar_read_timeout_seconds", 10)))
+        retry_count = max(0, int(getattr(settings, "calendar_read_retry_count", 1)))
+        retry_delay = max(0.0, float(getattr(settings, "calendar_read_retry_delay_seconds", 0.4)))
+        output, is_error, attempts = _run_osascript_with_retry(
+            script,
+            timeout=timeout,
+            retry_count=retry_count,
+            retry_delay=retry_delay,
+        )
         if is_error:
+            if "timed out" in output.lower() and attempts > 1:
+                output = (
+                    f"Calendar query timed out after {attempts} attempts. "
+                    "Check Calendar permissions and app responsiveness, then try again."
+                )
             return ToolResult(tool_name=self.name, content=output, is_error=True)
         if not output:
             return ToolResult(tool_name=self.name, content=f"No events found in the next {days} days.")

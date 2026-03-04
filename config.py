@@ -151,6 +151,17 @@ class Settings:
     # 'allow_insecure_fallback': retry with verify=False on SSL failure and annotate
     # the result.  Use only when fetching trusted internal URLs with self-signed certs.
     web_fetch_tls_mode: str         # WEB_FETCH_TLS_MODE — 'strict' or 'allow_insecure_fallback'
+    # CSV allowlist of domains where insecure TLS fallback is permitted.
+    # Empty by default; must be explicitly set by the user.
+    web_fetch_insecure_fallback_domains: tuple[str, ...]
+    # If True, httpx retries SSL failures once using certifi's CA bundle before
+    # considering insecure fallback.
+    web_fetch_tls_retry_with_certifi: bool
+
+    # Calendar connector runtime tuning.
+    calendar_read_timeout_seconds: int
+    calendar_read_retry_count: int
+    calendar_read_retry_delay_seconds: float
 
 
 @lru_cache(maxsize=1)
@@ -208,4 +219,12 @@ def get() -> Settings:
         dnd_start_hour=_env_int("DND_START_HOUR", 23),
         dnd_end_hour=_env_int("DND_END_HOUR", 7),
         web_fetch_tls_mode=_env_str("WEB_FETCH_TLS_MODE", "strict"),
+        web_fetch_insecure_fallback_domains=_env_csv(
+            "WEB_FETCH_INSECURE_FALLBACK_DOMAINS",
+            (),
+        ),
+        web_fetch_tls_retry_with_certifi=_env_bool("WEB_FETCH_TLS_RETRY_WITH_CERTIFI", True),
+        calendar_read_timeout_seconds=max(1, _env_int("CALENDAR_READ_TIMEOUT_SECONDS", 10)),
+        calendar_read_retry_count=max(0, _env_int("CALENDAR_READ_RETRY_COUNT", 1)),
+        calendar_read_retry_delay_seconds=max(0.0, _env_float("CALENDAR_READ_RETRY_DELAY_SECONDS", 0.4)),
     )

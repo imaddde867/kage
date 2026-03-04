@@ -30,6 +30,11 @@ except ImportError:
     _HTTPX = None  # type: ignore[assignment]
 
 try:
+    import certifi as _CERTIFI  # type: ignore[import]
+except ImportError:
+    _CERTIFI = None  # type: ignore[assignment]
+
+try:
     # Suppress noisy lxml / cssselect UserWarnings emitted on import
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=UserWarning)
@@ -159,6 +164,23 @@ def _is_ssl_error(exc: Exception) -> bool:
     return any(k in msg for k in ("ssl", "certificate", "tls", "handshake", "verify"))
 
 
+def _normalize_domain(value: str) -> str:
+    return value.strip().lower().strip(".")
+
+
+def _is_domain_allowlisted(url: str, allowlist: tuple[str, ...]) -> bool:
+    host = _normalize_domain(urlparse(url).hostname or "")
+    if not host:
+        return False
+    for item in allowlist:
+        domain = _normalize_domain(item)
+        if not domain:
+            continue
+        if host == domain or host.endswith("." + domain):
+            return True
+    return False
+
+
 def _status_code(response: object) -> int | None:
     for key in ("status_code", "status", "statuscode"):
         value = getattr(response, key, None)
@@ -248,7 +270,10 @@ class WebFetchTool(Tool):
             )
 
         limit = _clamp_max_chars(max_chars)
-        tls_mode = _config.get().web_fetch_tls_mode
+        settings = _config.get()
+        tls_mode = settings.web_fetch_tls_mode
+        insecure_domains = tuple(getattr(settings, "web_fetch_insecure_fallback_domains", ()) or ())
+        retry_with_certifi = bool(getattr(settings, "web_fetch_tls_retry_with_certifi", True))
         attempts: list[str] = []
 
         if _ScraplingFetcher is not None:
@@ -293,7 +318,12 @@ class WebFetchTool(Tool):
 
         if _HTTPX is not None:
             result = self._httpx_fetch(
-                normalized_url, limit=limit, tls_mode=tls_mode, attempts=attempts
+                normalized_url,
+                limit=limit,
+                tls_mode=tls_mode,
+                attempts=attempts,
+                retry_with_certifi=retry_with_certifi,
+                insecure_fallback_domains=insecure_domains,
             )
             if result is not None:
                 return result
@@ -317,7 +347,10 @@ class WebFetchTool(Tool):
         limit: int,
         tls_mode: str,
         attempts: list[str],
+        retry_with_certifi: bool,
+        insecure_fallback_domains: tuple[str, ...],
         insecure: bool = False,
+        certifi_retry: bool = False,
     ) -> "ToolResult | None":
         """Attempt one httpx GET and return a ToolResult on success, None on failure.
 
@@ -325,16 +358,26 @@ class WebFetchTool(Tool):
         path).  Appends failure descriptions to `attempts` so the caller can
         surface them in a consolidated error message.
         """
+        verify: object = True
+        if insecure:
+            verify = False
+        elif certifi_retry and _CERTIFI is not None:
+            verify = _CERTIFI.where()
+
         try:
             response = _HTTPX.get(
                 url,
                 timeout=_TIMEOUT_SECONDS,
                 follow_redirects=True,
-                verify=not insecure,
+                verify=verify,
             )
             final_url = _response_url(response, url)
             status_code = _status_code(response)
-            annotation = " [TLS verification disabled]" if insecure else ""
+            annotation = ""
+            if insecure:
+                annotation = " [TLS verification disabled]"
+            elif certifi_retry:
+                annotation = " [CA bundle: certifi]"
             if status_code in {401, 403, 429}:
                 return ToolResult(
                     tool_name=self.name,
@@ -382,12 +425,46 @@ class WebFetchTool(Tool):
         except Exception as exc:
             if (
                 not insecure
+                and not certifi_retry
+                and retry_with_certifi
+                and _CERTIFI is not None
+                and _is_ssl_error(exc)
+            ):
+                attempts.append(f"HTTP fetch SSL error ({exc}) — retrying with certifi CA bundle")
+                return self._httpx_fetch(
+                    url,
+                    limit=limit,
+                    tls_mode=tls_mode,
+                    attempts=attempts,
+                    retry_with_certifi=retry_with_certifi,
+                    insecure_fallback_domains=insecure_fallback_domains,
+                    certifi_retry=True,
+                )
+            if (
+                not insecure
                 and tls_mode == "allow_insecure_fallback"
                 and _is_ssl_error(exc)
             ):
-                attempts.append(f"HTTP fetch SSL error ({exc}) — retrying without verification")
-                return self._httpx_fetch(
-                    url, limit=limit, tls_mode=tls_mode, attempts=attempts, insecure=True
+                if _is_domain_allowlisted(url, insecure_fallback_domains):
+                    attempts.append(
+                        f"HTTP fetch SSL error ({exc}) — retrying without verification for allowlisted domain"
+                    )
+                    return self._httpx_fetch(
+                        url,
+                        limit=limit,
+                        tls_mode=tls_mode,
+                        attempts=attempts,
+                        retry_with_certifi=retry_with_certifi,
+                        insecure_fallback_domains=insecure_fallback_domains,
+                        insecure=True,
+                    )
+                host = urlparse(url).hostname or url
+                attempts.append(
+                    (
+                        f"HTTP fetch SSL error ({exc}). Insecure fallback blocked for domain '{host}'. "
+                        "Set WEB_FETCH_INSECURE_FALLBACK_DOMAINS to permit trusted domains."
+                    )
                 )
+                return None
             attempts.append(f"HTTP fallback failed: {exc}")
             return None
