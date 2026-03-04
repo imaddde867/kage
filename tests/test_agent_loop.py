@@ -1,4 +1,17 @@
-"""Unit tests for core/agent/loop.py with a scripted mock runtime (no LLM)."""
+"""Unit tests for core/agent/loop.py with a scripted mock runtime (no LLM).
+
+Strategy
+--------
+_ScriptedRuntime replaces GenerationRuntime and returns pre-written XML strings
+one-by-one so tests are deterministic and run in milliseconds.  _mock_tokenizer
+concatenates all message contents so prompts can be inspected as plain strings.
+
+Test classes:
+    TestAgentLoopDirectAnswer   — model answers immediately with no tool calls
+    TestAgentLoopToolUse        — model calls tools, then answers; error paths
+    TestAgentLoopHistoryStructure — verifies role alternation in the built prompt
+    TestAgentLoopContextInjection — entity context appears in system prompt
+"""
 import unittest
 from collections.abc import Iterator
 from typing import Any
@@ -15,7 +28,12 @@ from core.agent.tool_registry import ToolRegistry
 # ---------------------------------------------------------------------------
 
 class _ScriptedRuntime:
-    """Returns pre-scripted XML responses in order; repeats the last one when exhausted."""
+    """Fake GenerationRuntime that yields pre-written responses in order.
+
+    Responses are consumed one per stream_raw() call.  Once the list is
+    exhausted the last response is repeated — this keeps infinite-loop tests
+    from crashing while letting the max_steps cap trigger as expected.
+    """
 
     def __init__(self, responses: list[str]) -> None:
         self._responses = list(responses)
@@ -24,18 +42,25 @@ class _ScriptedRuntime:
     def stream_raw(
         self, prompt: str, *, max_tokens: int = 256, track_stats: bool = True
     ) -> Iterator[str]:
+        """Yield the next scripted response as a single chunk."""
         text = self._responses[min(self._index, len(self._responses) - 1)]
         self._index += 1
         yield text
 
 
 def _mock_tokenizer() -> Any:
+    """Return a tokenizer mock whose apply_chat_template joins message contents.
+
+    This lets tests inspect the assembled prompt as a plain string by checking
+    that expected substrings are present (e.g. tool observation, entity context).
+    """
     tok = MagicMock()
     tok.apply_chat_template = lambda msgs, **kw: " ".join(m["content"] for m in msgs)
     return tok
 
 
 def _registry(*tools: Tool) -> ToolRegistry:
+    """Convenience helper — builds a ToolRegistry pre-loaded with the given tools."""
     r = ToolRegistry()
     for t in tools:
         r.register(t)
@@ -43,6 +68,7 @@ def _registry(*tools: Tool) -> ToolRegistry:
 
 
 class _UpperTool(Tool):
+    """Returns the uppercased version of its text argument — simple, deterministic."""
     name = "upper"
     description = "Returns the uppercased text"
     parameters: dict[str, Any] = {
@@ -56,6 +82,7 @@ class _UpperTool(Tool):
 
 
 class _ErrorTool(Tool):
+    """Always returns an error ToolResult — used to verify loop continues after errors."""
     name = "bad_tool"
     description = "Always fails"
     parameters: dict[str, Any] = {}
@@ -69,9 +96,14 @@ class _ErrorTool(Tool):
 # ---------------------------------------------------------------------------
 
 class TestAgentLoopDirectAnswer(unittest.TestCase):
-    """Model answers without calling any tools."""
+    """Model answers without calling any tools.
+
+    These tests verify the happy path where a single generation step produces
+    a final <answer> (or falls back to plain text).  No tools are invoked.
+    """
 
     def _loop(self, responses: list[str], tools: list[Tool] | None = None) -> AgentLoop:
+        """Create an AgentLoop with a scripted runtime and optional tools."""
         return AgentLoop(
             runtime=_ScriptedRuntime(responses),
             tokenizer=_mock_tokenizer(),
@@ -80,23 +112,26 @@ class TestAgentLoopDirectAnswer(unittest.TestCase):
         )
 
     def test_direct_answer(self) -> None:
+        """A plain <answer> tag on the first step yields the answer and stops."""
         loop = self._loop(["<answer>Paris is the capital of France.</answer>"])
         result = "".join(loop.run("What is the capital of France?"))
         self.assertEqual(result, "Paris is the capital of France.")
 
     def test_answer_with_thought(self) -> None:
+        """<thought> is silently discarded; only the <answer> content is yielded."""
         raw = "<thought>I know this.</thought>\n<answer>42 is the answer.</answer>"
         loop = self._loop([raw])
         result = "".join(loop.run("What is the answer to life?"))
         self.assertEqual(result, "42 is the answer.")
 
     def test_plain_text_fallback(self) -> None:
-        """No XML tags at all — raw text should be yielded as the answer."""
+        """No XML tags at all — raw text is used as the answer via the plain-text fallback."""
         loop = self._loop(["I just know this without tools."])
         result = "".join(loop.run("Tell me something."))
         self.assertEqual(result, "I just know this without tools.")
 
     def test_empty_response_hits_max_steps(self) -> None:
+        """Empty generation output produces no answer and no tool call; max_steps=1 triggers cap."""
         # empty raw → no XML, no text → loop exhausts and yields cap message
         loop = self._loop([""])
         result = "".join(loop.run("", max_steps=1))
@@ -104,9 +139,18 @@ class TestAgentLoopDirectAnswer(unittest.TestCase):
 
 
 class TestAgentLoopToolUse(unittest.TestCase):
-    """Model calls a tool then answers."""
+    """Model calls a tool then answers — verifies the full ReAct cycle.
+
+    The scripted runtime produces tool-call XML on early steps and a final
+    <answer> at the end.  These tests verify that the loop:
+      - dispatches the tool call correctly
+      - passes the observation back into the next prompt
+      - continues after tool errors or unknown tool names
+      - terminates when max_steps is hit
+    """
 
     def _loop(self, responses: list[str], tools: list[Tool]) -> AgentLoop:
+        """Create an AgentLoop pre-loaded with the given scripted responses and tools."""
         return AgentLoop(
             runtime=_ScriptedRuntime(responses),
             tokenizer=_mock_tokenizer(),
@@ -115,6 +159,7 @@ class TestAgentLoopToolUse(unittest.TestCase):
         )
 
     def test_tool_then_answer(self) -> None:
+        """One tool call followed by a final answer — the basic ReAct step."""
         responses = [
             '<thought>Let me uppercase this.</thought>\n<tool>upper</tool>\n<input>{"text": "hello"}</input>',
             "<answer>The result is HELLO.</answer>",
@@ -124,7 +169,7 @@ class TestAgentLoopToolUse(unittest.TestCase):
         self.assertEqual(result, "The result is HELLO.")
 
     def test_tool_error_still_continues(self) -> None:
-        """If tool returns is_error, the loop continues to the next step."""
+        """If tool returns is_error=True, the loop feeds the error as an observation and continues."""
         responses = [
             '<tool>bad_tool</tool>\n<input>{}</input>',
             "<answer>Could not complete that task.</answer>",
@@ -134,7 +179,7 @@ class TestAgentLoopToolUse(unittest.TestCase):
         self.assertEqual(result, "Could not complete that task.")
 
     def test_unknown_tool_call_continues(self) -> None:
-        """Calling a non-registered tool should return error result and let loop continue."""
+        """Calling a non-registered tool returns an error observation; loop continues normally."""
         responses = [
             '<tool>does_not_exist</tool>\n<input>{}</input>',
             "<answer>I couldn't use that tool.</answer>",
@@ -144,7 +189,7 @@ class TestAgentLoopToolUse(unittest.TestCase):
         self.assertEqual(result, "I couldn't use that tool.")
 
     def test_max_steps_cap(self) -> None:
-        """Loop hitting max steps yields a graceful failure message."""
+        """When every step is a tool call, the loop hits max_steps and yields a graceful message."""
         # runtime always returns a tool call — never a final answer
         loop = self._loop(
             ['<tool>upper</tool>\n<input>{"text": "x"}</input>'] * 20,
@@ -154,6 +199,7 @@ class TestAgentLoopToolUse(unittest.TestCase):
         self.assertIn("step limit", result.lower())
 
     def test_multi_step_two_tool_calls(self) -> None:
+        """Two consecutive tool calls followed by a final answer — verifies loop continues correctly."""
         responses = [
             '<tool>upper</tool>\n<input>{"text": "foo"}</input>',
             '<tool>upper</tool>\n<input>{"text": "bar"}</input>',
@@ -165,10 +211,20 @@ class TestAgentLoopToolUse(unittest.TestCase):
 
 
 class TestAgentLoopHistoryStructure(unittest.TestCase):
-    """Verify that the prompt builder receives correct role alternation."""
+    """Verify that the prompt builder receives correct role alternation.
+
+    After a tool call, the observation must appear in the *next* prompt.
+    The capturing tokenizer records every call to apply_chat_template so
+    tests can assert on the exact content of each step's prompt.
+    """
 
     def test_history_passed_to_tokenizer(self) -> None:
-        """The mock tokenizer joins all message contents; we verify tool result appears."""
+        """Tool observation (WORLD) must appear in the second step's assembled prompt.
+
+        This confirms that _build_prompt() correctly injects the prior
+        assistant output and the tool result as history before calling the
+        tokenizer for step 2.
+        """
         collected_prompts: list[str] = []
 
         class _CapturingTokenizer:
@@ -195,9 +251,15 @@ class TestAgentLoopHistoryStructure(unittest.TestCase):
 
 
 class TestAgentLoopContextInjection(unittest.TestCase):
-    """Entity context block appears in the system prompt."""
+    """Entity context block passed to run() appears in the system prompt.
+
+    BrainService passes the user's known facts/tasks as a context string.
+    This test verifies that string ends up in the first step's prompt so
+    the model can reference it when reasoning.
+    """
 
     def test_context_in_prompt(self) -> None:
+        """The context kwarg is included in the first prompt's system message."""
         captured: list[str] = []
 
         class _CapturingTokenizer:
