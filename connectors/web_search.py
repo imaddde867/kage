@@ -11,13 +11,20 @@ Install:
 """
 from __future__ import annotations
 
+import warnings
+
 from core.agent.tool_base import Tool, ToolResult
 
 # Optional import — None if duckduckgo-search is not installed.
 # Keeping this at module level (rather than inside execute) makes it
 # patchable in tests via @patch("connectors.web_search._DDGS", ...).
+# DeprecationWarnings from the duckduckgo_search package (rename notices) are
+# suppressed here so they don't appear in user-facing terminal output.
 try:
-    from duckduckgo_search import DDGS as _DDGS  # type: ignore[import]
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        warnings.filterwarnings("ignore", category=UserWarning)
+        from duckduckgo_search import DDGS as _DDGS  # type: ignore[import]
 except ImportError:
     _DDGS = None  # type: ignore[assignment]
 

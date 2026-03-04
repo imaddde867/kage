@@ -189,12 +189,17 @@ class TestAgentLoopToolUse(unittest.TestCase):
         self.assertEqual(result, "I couldn't use that tool.")
 
     def test_max_steps_cap(self) -> None:
-        """When every step is a tool call, the loop hits max_steps and yields a graceful message."""
-        # runtime always returns a tool call — never a final answer
-        loop = self._loop(
-            ['<tool>upper</tool>\n<input>{"text": "x"}</input>'] * 20,
-            [_UpperTool()],
-        )
+        """Loop terminates gracefully when tool calls never produce an answer.
+
+        When every response is a tool call with varying args, the repeated-tool
+        guard does not fire.  After max_steps iterations the step-limit message
+        is returned.
+        """
+        # Varying args prevent the repeated-tool guard from firing; only max_steps caps it
+        responses = [
+            f'<tool>upper</tool>\n<input>{{"text": "step{i}"}}</input>' for i in range(20)
+        ]
+        loop = self._loop(responses, [_UpperTool()])
         result = "".join(loop.run("Loop forever", max_steps=3))
         self.assertIn("step limit", result.lower())
 
@@ -248,6 +253,97 @@ class TestAgentLoopHistoryStructure(unittest.TestCase):
         # Second prompt (step 2) must contain the tool observation
         self.assertGreater(len(collected_prompts), 1)
         self.assertIn("WORLD", collected_prompts[1])
+
+
+class TestAgentLoopRepeatedToolGuard(unittest.TestCase):
+    """When the same tool+args is called 3 times the loop bails with a message.
+
+    This prevents infinite fetch loops where the agent keeps calling web_fetch
+    on the same URL without making progress.
+    """
+
+    def _loop(self, responses: list[str], tools: list[Tool]) -> AgentLoop:
+        return AgentLoop(
+            runtime=_ScriptedRuntime(responses),
+            tokenizer=_mock_tokenizer(),
+            registry=_registry(*tools),
+            settings=config.get(),
+        )
+
+    def test_repeated_same_call_triggers_guard(self) -> None:
+        """Third identical (tool, args) call yields the 'making progress' bail message."""
+        # Every response is the same tool call with the same args
+        loop = self._loop(
+            ['<tool>upper</tool>\n<input>{"text": "x"}</input>'] * 10,
+            [_UpperTool()],
+        )
+        result = "".join(loop.run("Uppercase x forever", max_steps=10))
+        self.assertIn("progress", result.lower())
+
+    def test_different_args_not_counted_together(self) -> None:
+        """Calls with different arguments are tracked separately — not treated as repeats."""
+        responses = [
+            '<tool>upper</tool>\n<input>{"text": "a"}</input>',
+            '<tool>upper</tool>\n<input>{"text": "b"}</input>',
+            '<tool>upper</tool>\n<input>{"text": "c"}</input>',
+            "<answer>Done: A B C.</answer>",
+        ]
+        loop = self._loop(responses, [_UpperTool()])
+        result = "".join(loop.run("Uppercase a, b, c", max_steps=10))
+        self.assertEqual(result, "Done: A B C.")
+
+
+class TestTruthfulnessGuard(unittest.TestCase):
+    """guard_answer_truthfulness rewrites answers that falsely claim web/calendar lookups.
+
+    When the agent produces an answer claiming a search was performed but no
+    relevant tool was called, a disclaimer is appended.
+    """
+
+    def _loop(self, responses: list[str]) -> AgentLoop:
+        return AgentLoop(
+            runtime=_ScriptedRuntime(responses),
+            tokenizer=_mock_tokenizer(),
+            registry=_registry(),
+            settings=config.get(),
+        )
+
+    def test_false_web_claim_gets_disclaimer(self) -> None:
+        """Answer claiming 'I searched' without any web tool adds a note."""
+        loop = self._loop(["<answer>I searched the web and found that Python 4 is out.</answer>"])
+        result = "".join(loop.run("Has Python 4 been released?"))
+        self.assertIn("Note:", result)
+        self.assertIn("training knowledge", result)
+
+    def test_real_web_search_no_disclaimer(self) -> None:
+        """When web_search was actually called, no disclaimer is added to the answer."""
+        responses = [
+            '<tool>web_search</tool>\n<input>{"query": "Python 4"}</input>',
+            "<answer>I searched and found Python 4 is not out yet.</answer>",
+        ]
+
+        class _FakeWebSearchTool(Tool):
+            name = "web_search"
+            description = "Search"
+            parameters: dict = {}
+
+            def execute(self, **kwargs: Any) -> ToolResult:
+                return ToolResult(tool_name=self.name, content="No results for Python 4.")
+
+        loop = AgentLoop(
+            runtime=_ScriptedRuntime(responses),
+            tokenizer=_mock_tokenizer(),
+            registry=_registry(_FakeWebSearchTool()),
+            settings=config.get(),
+        )
+        result = "".join(loop.run("Python 4 status?"))
+        self.assertNotIn("Note:", result)
+
+    def test_plain_answer_unchanged(self) -> None:
+        """Answers making no external claims pass through without modification."""
+        loop = self._loop(["<answer>The capital of France is Paris.</answer>"])
+        result = "".join(loop.run("Capital of France?"))
+        self.assertEqual(result, "The capital of France is Paris.")
 
 
 class TestAgentLoopContextInjection(unittest.TestCase):
