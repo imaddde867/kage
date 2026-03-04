@@ -14,6 +14,7 @@ Test classes:
 """
 import unittest
 from collections.abc import Iterator
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -40,9 +41,15 @@ class _ScriptedRuntime:
         self._index = 0
 
     def stream_raw(
-        self, prompt: str, *, max_tokens: int = 256, track_stats: bool = True
+        self,
+        prompt: str,
+        *,
+        max_tokens: int = 256,
+        track_stats: bool = True,
+        temperature: float | None = None,
     ) -> Iterator[str]:
         """Yield the next scripted response as a single chunk."""
+        _ = (prompt, max_tokens, track_stats, temperature)
         text = self._responses[min(self._index, len(self._responses) - 1)]
         self._index += 1
         yield text
@@ -89,6 +96,36 @@ class _ErrorTool(Tool):
 
     def execute(self, **kwargs: Any) -> ToolResult:
         return ToolResult(tool_name=self.name, content="Something went wrong.", is_error=True)
+
+
+class _LargeTool(Tool):
+    """Returns a very large payload to test observation compression/truncation."""
+    name = "large"
+    description = "Large payload"
+    parameters: dict[str, Any] = {}
+
+    def execute(self, **kwargs: Any) -> ToolResult:
+        return ToolResult(
+            tool_name=self.name,
+            content="URL: https://example.com/huge\n" + ("x" * 6000),
+        )
+
+
+class _BlockedWebFetchTool(Tool):
+    name = "web_fetch"
+    description = "Blocked fetch"
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {"url": {"type": "string"}},
+        "required": ["url"],
+    }
+
+    def execute(self, *, url: str, **kwargs: Any) -> ToolResult:
+        return ToolResult(
+            tool_name=self.name,
+            content=f"Blocked by anti-bot / JS challenge for {url} (status 403).",
+            is_error=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +225,26 @@ class TestAgentLoopToolUse(unittest.TestCase):
         result = "".join(loop.run("Use unknown tool"))
         self.assertEqual(result, "I couldn't use that tool.")
 
+    def test_malformed_tool_output_routes_through_error_observation(self) -> None:
+        responses = [
+            "<tool name=>",
+            "<answer>I recovered after the malformed tool call.</answer>",
+        ]
+        loop = self._loop(responses, [])
+        result = "".join(loop.run("test malformed output"))
+        self.assertEqual(result, "I recovered after the malformed tool call.")
+        self.assertNotIn("<tool", result.lower())
+
+    def test_live_web_query_with_no_usable_sources_returns_verify_failure(self) -> None:
+        responses = [
+            '<tool>web_fetch</tool><input>{"url":"https://example.com/blocked"}</input>',
+            "<answer>Here are the key updates from today: massive escalation.</answer>",
+        ]
+        loop = self._loop(responses, [_BlockedWebFetchTool()])
+        result = "".join(loop.run("Any recent updates from today on this war?"))
+        self.assertIn("couldn't verify reliable live updates", result.lower())
+        self.assertNotIn("massive escalation", result.lower())
+
     def test_max_steps_cap(self) -> None:
         """Loop terminates gracefully when tool calls never produce an answer.
 
@@ -253,6 +310,36 @@ class TestAgentLoopHistoryStructure(unittest.TestCase):
         # Second prompt (step 2) must contain the tool observation
         self.assertGreater(len(collected_prompts), 1)
         self.assertIn("WORLD", collected_prompts[1])
+
+    def test_history_budget_truncates_large_observations(self) -> None:
+        collected_prompts: list[str] = []
+
+        class _CapturingTokenizer:
+            def apply_chat_template(self, msgs: list[dict], **kw: Any) -> str:
+                prompt = " ".join(m["content"] for m in msgs)
+                collected_prompts.append(prompt)
+                return prompt
+
+        responses = [
+            "<tool>large</tool><input>{}</input>",
+            "<answer>done</answer>",
+        ]
+        settings = replace(
+            config.get(),
+            agent_history_char_budget=1200,
+            agent_observation_max_chars=300,
+        )
+        loop = AgentLoop(
+            runtime=_ScriptedRuntime(responses),
+            tokenizer=_CapturingTokenizer(),
+            registry=_registry(_LargeTool()),
+            settings=settings,
+        )
+        result = "".join(loop.run("Run large tool once"))
+
+        self.assertEqual(result, "done")
+        self.assertGreaterEqual(len(collected_prompts), 2)
+        self.assertLess(len(collected_prompts[1]), 2500)
 
 
 class TestAgentLoopRepeatedToolGuard(unittest.TestCase):

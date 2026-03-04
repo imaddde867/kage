@@ -16,12 +16,27 @@ from core.brain_guardrails import (
     deterministic_response,
     update_policy_state,
 )
-from core.brain_prompting import apply_chat_template, build_messages, build_system_prompt, collect_recent_turns
+from core.brain_prompting import (
+    apply_chat_template,
+    build_messages,
+    build_system_prompt,
+    collect_recent_turns,
+    derive_topic_hint,
+)
+from core.intent_signals import DEFAULT_SIGNALS
 from core.memory import MemoryStore
 
 logger = logging.getLogger(__name__)
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+|(?<=[.!?])$")
+_ROUTING_SIGNAL_WEIGHTS: dict[str, float] = {
+    "capability_query": -2.0,
+    "calendar_lookup": 2.0,
+    "live_web": 1.5,
+    "needs_tools": 1.0,
+}
+_ROUTING_SCORE_TOOLS_THRESHOLD = 1.0
+_ROUTING_SCORE_NO_TOOLS_THRESHOLD = -1.0
 
 
 class BrainService:
@@ -172,7 +187,26 @@ class BrainService:
             recent_turns=recent_turns,
             policy_note=policy_note,
             entity_context=entity_context,
+            topic_hint=derive_topic_hint(recent_turns),
         )
+
+    def _wants_task_context(self, user_input: str) -> bool:
+        return DEFAULT_SIGNALS.has(user_input, "task_context")
+
+    def _agent_entity_context(self, user_input: str) -> str:
+        if not hasattr(self, "_entity_store"):
+            return ""
+
+        mode = str(getattr(self.settings, "agent_entity_mode", "relevance_filtered")).strip().lower()
+        budget = getattr(self.settings, "entity_recall_budget", 400)
+
+        if mode == "full":
+            return self._entity_store.recall_for_prompt(char_budget=budget)
+        if mode == "personal_only":
+            return self._entity_store.recall_personal_context()
+        if self._wants_task_context(user_input):
+            return self._entity_store.recall_for_prompt(char_budget=budget)
+        return self._entity_store.recall_personal_context()
 
     def _build_prompt(self, user_input: str, *, text_mode: bool, route: Any = None) -> str:
         return apply_chat_template(
@@ -281,6 +315,32 @@ class BrainService:
         ]
         return apply_chat_template(self._runtime.tokenizer, messages)
 
+    def _capability_response(self, user_input: str) -> str | None:
+        registry = getattr(self, "_tool_registry", None)
+        if registry is None:
+            return None
+        if not DEFAULT_SIGNALS.has(user_input, "capability_query"):
+            return None
+        names = registry.names()
+        if not names:
+            return "I don't have any connectors enabled right now."
+        tool_list = ", ".join(names)
+        return (
+            f"I can use these connectors right now: {tool_list}. "
+            "I can run them through the agent path whenever a request needs external data or actions."
+        )
+
+    def _heuristic_needs_tools(self, user_input: str) -> bool | None:
+        text = user_input.strip()
+        if not text:
+            return False
+        score = DEFAULT_SIGNALS.weighted_score(text, _ROUTING_SIGNAL_WEIGHTS)
+        if score >= _ROUTING_SCORE_TOOLS_THRESHOLD:
+            return True
+        if score <= _ROUTING_SCORE_NO_TOOLS_THRESHOLD:
+            return False
+        return None
+
     def _needs_tools(self, user_input: str) -> bool:
         """Ask the LLM whether this request requires tool use.
 
@@ -290,6 +350,10 @@ class BrainService:
 
         track_stats=False avoids overwriting brain.last_stats used by main.py.
         """
+        heuristic = self._heuristic_needs_tools(user_input)
+        if heuristic is not None:
+            return heuristic
+
         prompt = self._routing_prompt(user_input)
         for attempt in range(2):
             answer = "".join(
@@ -319,11 +383,11 @@ class BrainService:
         """
         assert self._agent_loop is not None
         self._update_policy_state(user_input)
-        entity_context = ""
-        if hasattr(self, "_entity_store"):
-            entity_context = self._entity_store.recall_for_prompt(
-                char_budget=getattr(self.settings, "entity_recall_budget", 400)
-            )
+        entity_context = self._agent_entity_context(user_input)
+        topic_hint = derive_topic_hint(self._collect_recent_turns())
+        if topic_hint:
+            topic_line = f"Conversation topic: {topic_hint}"
+            entity_context = f"{entity_context}\n{topic_line}".strip() if entity_context else topic_line
         parts: list[str] = []
         for chunk in self._agent_loop.run(user_input, context=entity_context):
             parts.append(chunk)
@@ -332,6 +396,12 @@ class BrainService:
         self._persist_exchange(user_input, reply)
 
     def think_stream(self, user_input: str) -> Iterator[str]:
+        capability = self._capability_response(user_input)
+        if capability:
+            yield capability
+            self._persist_exchange(user_input, capability)
+            return
+
         # Routing check: if the agent is enabled and the LLM decides this
         # request needs tools, delegate to the agentic path immediately.
         # The fast conversational path continues below when tools are not needed.
@@ -364,6 +434,12 @@ class BrainService:
                 yield suggestion
 
     def think_text_stream(self, user_input: str) -> Iterator[str]:
+        capability = self._capability_response(user_input)
+        if capability:
+            yield capability
+            self._persist_exchange(user_input, capability)
+            return
+
         # Same routing check as think_stream — text mode also benefits from
         # the agentic path when tool use is needed.
         if self._agent_loop is not None and self._needs_tools(user_input):

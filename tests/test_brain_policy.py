@@ -26,6 +26,20 @@ class _FakeMemory:
         return None
 
 
+class _FakeEntityStore:
+    def __init__(self) -> None:
+        self.personal_calls = 0
+        self.full_calls = 0
+
+    def recall_personal_context(self, *, char_budget: int = 150) -> str:
+        self.personal_calls += 1
+        return "Profile: location=Turku"
+
+    def recall_for_prompt(self, *, char_budget: int = 400) -> str:
+        self.full_calls += 1
+        return "Tasks: plan a trip to Lisbon"
+
+
 class BrainPolicyTests(unittest.TestCase):
     def test_policy_note_detects_conflicting_preferences(self) -> None:
         note = _derive_policy_note(
@@ -165,6 +179,63 @@ class BrainPolicyTests(unittest.TestCase):
         system = messages[0]["content"]
         self.assertLessEqual(len(system), 2500)
 
+    def test_topic_hint_is_injected_when_passed(self) -> None:
+        from core.brain_prompting import build_messages
+
+        messages = build_messages(
+            user_input="How about premium restaurants?",
+            user_name="Test",
+            text_mode=False,
+            memory=_FakeMemory([]),
+            recent_turns=[("What is there to do in Agadir in July?", "Some ideas...")],
+            policy_note="",
+            entity_context="",
+            topic_hint="What is there to do in Agadir in July?",
+        )
+        system = messages[0]["content"]
+        self.assertIn("Current topic hint", system)
+        self.assertIn("Agadir", system)
+
+    def test_agent_entity_context_relevance_filtered_uses_personal_by_default(self) -> None:
+        brain = BrainService.__new__(BrainService)
+        brain.settings = SimpleNamespace(entity_recall_budget=400, agent_entity_mode="relevance_filtered")
+        brain._entity_store = _FakeEntityStore()
+
+        ctx = brain._agent_entity_context("How about premium restaurants with a view?")
+        self.assertIn("Profile:", ctx)
+        self.assertEqual(brain._entity_store.personal_calls, 1)
+        self.assertEqual(brain._entity_store.full_calls, 0)
+
+    def test_agent_entity_context_relevance_filtered_uses_full_for_task_queries(self) -> None:
+        brain = BrainService.__new__(BrainService)
+        brain.settings = SimpleNamespace(entity_recall_budget=400, agent_entity_mode="relevance_filtered")
+        brain._entity_store = _FakeEntityStore()
+
+        ctx = brain._agent_entity_context("What should I do next from my tasks?")
+        self.assertIn("Tasks:", ctx)
+        self.assertEqual(brain._entity_store.full_calls, 1)
+
+    def test_agent_entity_context_mode_full_always_uses_full_recall(self) -> None:
+        brain = BrainService.__new__(BrainService)
+        brain.settings = SimpleNamespace(entity_recall_budget=400, agent_entity_mode="full")
+        brain._entity_store = _FakeEntityStore()
+
+        ctx = brain._agent_entity_context("Anything")
+        self.assertIn("Tasks:", ctx)
+        self.assertEqual(brain._entity_store.full_calls, 1)
+
+    def test_capability_response_lists_registered_tools(self) -> None:
+        brain = BrainService.__new__(BrainService)
+        fake_registry = MagicMock()
+        fake_registry.names.return_value = ["web_search", "web_fetch", "calendar_read"]
+        brain._tool_registry = fake_registry
+
+        reply = brain._capability_response("what connectors can you use?")
+        self.assertIsNotNone(reply)
+        assert reply is not None
+        self.assertIn("web_search", reply)
+        self.assertIn("calendar_read", reply)
+
 
 # ---------------------------------------------------------------------------
 # Routing: _needs_tools retry + temperature override
@@ -203,7 +274,8 @@ class TestNeedsToolsRouting(unittest.TestCase):
         """Classifier output starting with 'yes' → _needs_tools returns True."""
         runtime = _ScriptedRuntime(["yes"])
         brain = self._brain_with_runtime(runtime)
-        self.assertTrue(brain._needs_tools("What is the Bitcoin price?"))
+        self.assertTrue(brain._needs_tools("Please decide the best route for this request."))
+        self.assertEqual(len(runtime._calls), 1)
 
     def test_no_answer_returns_false(self) -> None:
         """Classifier output starting with 'no' → _needs_tools returns False."""
@@ -215,19 +287,21 @@ class TestNeedsToolsRouting(unittest.TestCase):
         """First inconclusive, second 'yes' → returns True (retry works)."""
         runtime = _ScriptedRuntime(["maybe", "yes"])
         brain = self._brain_with_runtime(runtime)
-        self.assertTrue(brain._needs_tools("Look something up"))
+        self.assertTrue(brain._needs_tools("This request is unclear."))
+        self.assertEqual(len(runtime._calls), 2)
 
     def test_inconclusive_twice_defaults_to_tools(self) -> None:
         """Two inconclusive answers → defaults to True so requests are not dropped."""
         runtime = _ScriptedRuntime(["???", "hmm"])
         brain = self._brain_with_runtime(runtime)
         self.assertTrue(brain._needs_tools("Unclear request"))
+        self.assertEqual(len(runtime._calls), 2)
 
     def test_temperature_zero_passed_to_stream_raw(self) -> None:
         """_needs_tools passes temperature=0.0 to stream_raw for deterministic output."""
         runtime = _ScriptedRuntime(["yes"])
         brain = self._brain_with_runtime(runtime)
-        brain._needs_tools("search something")
+        brain._needs_tools("Classify this route.")
         # At least one call must have temperature=0.0
         temps = [c.get("temperature") for c in runtime._calls]
         self.assertIn(0.0, temps)
@@ -236,13 +310,25 @@ class TestNeedsToolsRouting(unittest.TestCase):
         """'YES' (uppercase) is correctly interpreted as yes."""
         runtime = _ScriptedRuntime(["YES please"])
         brain = self._brain_with_runtime(runtime)
-        self.assertTrue(brain._needs_tools("Fetch something"))
+        self.assertTrue(brain._needs_tools("Classify this ambiguous request."))
 
     def test_case_insensitive_no(self) -> None:
         """'No.' with trailing punctuation is correctly interpreted as no."""
         runtime = _ScriptedRuntime(["No. This is conversational."])
         brain = self._brain_with_runtime(runtime)
         self.assertFalse(brain._needs_tools("What is 2+2?"))
+
+    def test_heuristic_forces_calendar_queries_to_tools(self) -> None:
+        runtime = _ScriptedRuntime(["no"])
+        brain = self._brain_with_runtime(runtime)
+        self.assertTrue(brain._needs_tools("When is my next dentist visit?"))
+        self.assertEqual(runtime._calls, [])
+
+    def test_heuristic_blocks_capability_queries_from_tool_mode(self) -> None:
+        runtime = _ScriptedRuntime(["yes"])
+        brain = self._brain_with_runtime(runtime)
+        self.assertFalse(brain._needs_tools("What connectors can you use?"))
+        self.assertEqual(runtime._calls, [])
 
 
 # ---------------------------------------------------------------------------
