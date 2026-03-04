@@ -121,13 +121,26 @@ class Settings:
     proactive_debounce_seconds: int
     extraction_enabled: bool
 
-    # Agent
-    agent_enabled: bool
-    agent_max_steps: int
-    heartbeat_enabled: bool
-    heartbeat_interval_seconds: int
-    dnd_start_hour: int
-    dnd_end_hour: int
+    # Agent — autonomous tool-using ReAct loop (core/agent/).
+    # When agent_enabled is True, BrainService classifies each request with a fast
+    # 8-token routing call.  Requests that need tools are handled by AgentLoop;
+    # all others continue on the existing fast conversational path unchanged.
+    agent_enabled: bool             # AGENT_ENABLED — master switch; False disables all tool use
+    agent_max_steps: int            # AGENT_MAX_STEPS — hard cap on ReAct iterations per request
+
+    # Heartbeat — proactive background daemon (core/agent/heartbeat.py).
+    # A daemon thread wakes every heartbeat_interval_seconds, scans EntityStore for
+    # due/overdue items, and speaks a reminder if conditions allow (IDLE, not DND,
+    # debounce cleared).  The thread is a daemon so it auto-terminates with the process.
+    heartbeat_enabled: bool         # HEARTBEAT_ENABLED — starts HeartbeatAgent on voice mode startup
+    heartbeat_interval_seconds: int # HEARTBEAT_INTERVAL_SECONDS — seconds between wakeup checks
+
+    # Do Not Disturb — suppresses heartbeat speech during quiet hours.
+    # Overnight windows (e.g. dnd_start_hour=23, dnd_end_hour=7) are handled correctly:
+    # the check wraps midnight so any hour >= 23 OR < 7 is treated as DND.
+    # Same-day windows (e.g. dnd_start_hour=9, dnd_end_hour=17) also work naturally.
+    dnd_start_hour: int             # DND_START_HOUR — 24h hour (0–23) when quiet period begins
+    dnd_end_hour: int               # DND_END_HOUR   — 24h hour (0–23) when quiet period ends
 
 
 @lru_cache(maxsize=1)

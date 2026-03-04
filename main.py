@@ -197,6 +197,11 @@ def run_voice(settings: config.Settings, timing: bool = False) -> None:
     brain = BrainService(settings=settings)
     coordinator = AudioCoordinator(settings=settings)
 
+    # Start the proactive heartbeat daemon when enabled.  The daemon is a background
+    # thread that wakes periodically (heartbeat_interval_seconds) to check EntityStore
+    # for due/overdue tasks and speaks them aloud when conditions allow (idle audio,
+    # outside DND hours, debounce cleared).  It is a daemon thread so it terminates
+    # automatically when the main process exits — no explicit cleanup needed.
     if getattr(settings, "heartbeat_enabled", True):
         from core.agent.heartbeat import HeartbeatAgent
         HeartbeatAgent(brain, coordinator, settings).start()
