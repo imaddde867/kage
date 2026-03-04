@@ -85,7 +85,7 @@ class BrainService:
 
         Optional connectors (registered when extra packages are installed;
         silently skipped with a debug log if the import fails):
-            web_fetch         — requires httpx + trafilatura
+            web_fetch         — prefers scrapling[fetchers], falls back to httpx
             shell             — no extra deps, always available
             calendar_read     — macOS only (osascript)
             reminder_add      — macOS only (osascript)
@@ -114,7 +114,7 @@ class BrainService:
             from connectors.web_fetch import WebFetchTool
             registry.register(WebFetchTool())
         except ImportError:
-            logger.debug("web_fetch unavailable (install httpx + trafilatura to enable)")
+            logger.debug('web_fetch unavailable (install "scrapling[fetchers]" + httpx to enable)')
 
         try:
             from connectors.shell import ShellTool
@@ -261,7 +261,9 @@ class BrainService:
             "You are a routing classifier. Answer with a single word: 'yes' or 'no'.\n"
             "Output 'yes' if the request requires using external tools such as web search, "
             "calendar, shell commands, or memory operations.\n"
-            "Output 'no' if it is a simple conversational question answerable from knowledge alone."
+            "Also output 'yes' for time-sensitive facts, current events, prices, schedules, "
+            "or whenever browsing would improve reliability.\n"
+            "Output 'no' only if it is a simple conversational question answerable from knowledge alone."
         )
         messages = [
             {"role": "system", "content": system},

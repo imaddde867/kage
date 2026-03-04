@@ -82,6 +82,8 @@ Available tools:
 Rules:
 - One tool per step
 - Keep answers concise and natural for speech
+- For online research, prefer web_search first, then web_fetch on relevant URLs
+- Include source URLs briefly when reporting fetched web facts
 - If a tool fails, try an alternative or explain the limitation
 - Max {max_steps} steps
 
