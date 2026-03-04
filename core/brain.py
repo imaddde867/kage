@@ -8,6 +8,8 @@ from collections.abc import Iterator
 from typing import Any
 
 import config
+from core.agent.loop import AgentLoop
+from core.agent.tool_registry import ToolRegistry
 from core.brain_generation import GenerationRuntime
 from core.brain_guardrails import (
     derive_policy_note as _derive_policy_note,
@@ -45,6 +47,10 @@ class BrainService:
             # Initialized after warmup so tokenizer is ready
             self._llm_extractor: LLMEntityExtractor | None = None
 
+        # Agent loop — initialized after warmup (tokenizer must be ready)
+        self._agent_loop: AgentLoop | None = None
+        self._tool_registry: ToolRegistry | None = None
+
         self._warmup()
 
     def _warmup(self) -> None:
@@ -54,6 +60,52 @@ class BrainService:
         if hasattr(self, "_llm_extractor") and self._llm_extractor is None:
             from core.second_brain.llm_extractor import LLMEntityExtractor
             self._llm_extractor = LLMEntityExtractor(self._runtime, self._runtime.tokenizer)
+        # Initialize agent loop if enabled
+        if self.settings.agent_enabled and self._agent_loop is None:
+            self._tool_registry = self._build_tool_registry()
+            self._agent_loop = AgentLoop(
+                runtime=self._runtime,
+                tokenizer=self._runtime.tokenizer,
+                registry=self._tool_registry,
+                settings=self.settings,
+            )
+
+    def _build_tool_registry(self) -> ToolRegistry:
+        registry = ToolRegistry()
+
+        from connectors.web_search import WebSearchTool
+        from connectors.notify import NotifyTool, SpeakTool
+        registry.register(WebSearchTool())
+        registry.register(NotifyTool())
+        registry.register(SpeakTool())
+
+        if hasattr(self, "_entity_store"):
+            from connectors.memory_ops import MarkTaskDoneTool, UpdateFactTool, ListOpenTasksTool
+            db_path = self.memory.db_path
+            registry.register(MarkTaskDoneTool(db_path))
+            registry.register(UpdateFactTool(db_path))
+            registry.register(ListOpenTasksTool(db_path))
+
+        try:
+            from connectors.web_fetch import WebFetchTool
+            registry.register(WebFetchTool())
+        except ImportError:
+            logger.debug("web_fetch unavailable (install httpx + trafilatura to enable)")
+
+        try:
+            from connectors.shell import ShellTool
+            registry.register(ShellTool())
+        except ImportError:
+            logger.debug("shell connector unavailable")
+
+        try:
+            from connectors.apple_calendar import CalendarReadTool, ReminderAddTool
+            registry.register(CalendarReadTool())
+            registry.register(ReminderAddTool())
+        except ImportError:
+            logger.debug("apple_calendar connector unavailable")
+
+        return registry
 
     def _system_prompt(self, *, text_mode: bool = False) -> str:
         return build_system_prompt(self.settings.user_name, text_mode=text_mode)
@@ -174,7 +226,48 @@ class BrainService:
         ):
             self._extract_and_store(user_input, exchange_id)
 
+    def _routing_prompt(self, user_input: str) -> str:
+        system = (
+            "You are a routing classifier. Answer with a single word: 'yes' or 'no'.\n"
+            "Output 'yes' if the request requires using external tools such as web search, "
+            "calendar, shell commands, or memory operations.\n"
+            "Output 'no' if it is a simple conversational question answerable from knowledge alone."
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_input},
+        ]
+        return apply_chat_template(self._runtime.tokenizer, messages)
+
+    def _needs_tools(self, user_input: str) -> bool:
+        """Single LLM routing call — 8 tokens max."""
+        prompt = self._routing_prompt(user_input)
+        answer = "".join(
+            self._runtime.stream_raw(prompt, max_tokens=8, track_stats=False)
+        ).strip().lower()
+        return answer.startswith("yes")
+
+    def agent_stream(self, user_input: str) -> Iterator[str]:
+        """Agentic multi-step path."""
+        assert self._agent_loop is not None
+        self._update_policy_state(user_input)
+        entity_context = ""
+        if hasattr(self, "_entity_store"):
+            entity_context = self._entity_store.recall_for_prompt(
+                char_budget=getattr(self.settings, "entity_recall_budget", 400)
+            )
+        parts: list[str] = []
+        for chunk in self._agent_loop.run(user_input, context=entity_context):
+            parts.append(chunk)
+            yield chunk
+        reply = "".join(parts).strip()
+        self._persist_exchange(user_input, reply)
+
     def think_stream(self, user_input: str) -> Iterator[str]:
+        if self._agent_loop is not None and self._needs_tools(user_input):
+            yield from self.agent_stream(user_input)
+            return
+
         self._update_policy_state(user_input)
         deterministic = self._deterministic_response(user_input)
         if deterministic:
@@ -200,6 +293,10 @@ class BrainService:
                 yield suggestion
 
     def think_text_stream(self, user_input: str) -> Iterator[str]:
+        if self._agent_loop is not None and self._needs_tools(user_input):
+            yield from self.agent_stream(user_input)
+            return
+
         self._update_policy_state(user_input)
         deterministic = self._deterministic_response(user_input)
         if deterministic:

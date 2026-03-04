@@ -121,6 +121,14 @@ class Settings:
     proactive_debounce_seconds: int
     extraction_enabled: bool
 
+    # Agent
+    agent_enabled: bool
+    agent_max_steps: int
+    heartbeat_enabled: bool
+    heartbeat_interval_seconds: int
+    dnd_start_hour: int
+    dnd_end_hour: int
+
 
 @lru_cache(maxsize=1)
 def get() -> Settings:
@@ -166,4 +174,10 @@ def get() -> Settings:
         entity_recall_budget=_env_int("ENTITY_RECALL_BUDGET", 400),
         proactive_debounce_seconds=_env_int("PROACTIVE_DEBOUNCE_SECONDS", 60),
         extraction_enabled=_env_bool("EXTRACTION_ENABLED", True),
+        agent_enabled=_env_bool("AGENT_ENABLED", True),
+        agent_max_steps=_env_int("AGENT_MAX_STEPS", 8),
+        heartbeat_enabled=_env_bool("HEARTBEAT_ENABLED", True),
+        heartbeat_interval_seconds=_env_int("HEARTBEAT_INTERVAL_SECONDS", 300),
+        dnd_start_hour=_env_int("DND_START_HOUR", 23),
+        dnd_end_hour=_env_int("DND_END_HOUR", 7),
     )

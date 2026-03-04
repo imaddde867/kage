@@ -197,6 +197,10 @@ def run_voice(settings: config.Settings, timing: bool = False) -> None:
     brain = BrainService(settings=settings)
     coordinator = AudioCoordinator(settings=settings)
 
+    if getattr(settings, "heartbeat_enabled", True):
+        from core.agent.heartbeat import HeartbeatAgent
+        HeartbeatAgent(brain, coordinator, settings).start()
+
     print(f"  Kage online. Say '{settings.wake_word.title()}' to activate.\n")
 
     while True:
