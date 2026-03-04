@@ -45,6 +45,25 @@ _TIMEOUT_SECONDS = 12
 _SCRIPT_STYLE_RE = re.compile(r"(?is)<(script|style).*?>.*?</\1>")
 _TAG_RE = re.compile(r"(?is)<[^>]+>")
 _WS_RE = re.compile(r"\s+")
+_BLOCK_PATTERNS = (
+    "enable javascript",
+    "verify you are human",
+    "access denied",
+    "access to this page has been denied",
+    "captcha",
+    "cf-challenge",
+    "cloudflare",
+    "bot detection",
+    "unsupported browser",
+    "not available in your region",
+    "unsupported-eu",
+)
+_BLOCK_URL_PATTERNS = (
+    "/unsupported",
+    "unsupported-eu",
+    "/challenge",
+    "captcha",
+)
 
 
 def _normalize_url(url: str) -> str:
@@ -140,6 +159,47 @@ def _is_ssl_error(exc: Exception) -> bool:
     return any(k in msg for k in ("ssl", "certificate", "tls", "handshake", "verify"))
 
 
+def _status_code(response: object) -> int | None:
+    for key in ("status_code", "status", "statuscode"):
+        value = getattr(response, key, None)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            text = value.strip()
+            if text.isdigit():
+                return int(text)
+    return None
+
+
+def _response_url(response: object, fallback: str) -> str:
+    value = getattr(response, "url", None)
+    if isinstance(value, str) and value.strip():
+        return value
+    return fallback
+
+
+def _looks_like_block_page(text: str) -> bool:
+    lowered = text.lower()
+    return any(pattern in lowered for pattern in _BLOCK_PATTERNS)
+
+
+def _looks_like_block_url(url: str) -> bool:
+    lowered = url.lower()
+    return any(pattern in lowered for pattern in _BLOCK_URL_PATTERNS)
+
+
+def _blocked_content(url: str, status: int | None = None) -> str:
+    if status is not None:
+        return (
+            f"Blocked by anti-bot / JS challenge for {url} (status {status}). "
+            "Try a different source URL or use web_search for alternatives."
+        )
+    return (
+        f"Blocked by anti-bot / JS challenge for {url}. "
+        "Try a different source URL or use web_search for alternatives."
+    )
+
+
 def _clamp_max_chars(max_chars: int) -> int:
     try:
         requested = int(max_chars)
@@ -198,11 +258,32 @@ class WebFetchTool(Tool):
                     timeout=_TIMEOUT_SECONDS,
                     follow_redirects=True,
                 )
-                text = _extract_text_from_scrapling_response(response)
-                if text:
+                final_url = _response_url(response, normalized_url)
+                code = _status_code(response)
+                if code in {401, 403, 429}:
                     return ToolResult(
                         tool_name=self.name,
-                        content=f"URL: {normalized_url}\n{text[:limit]}",
+                        content=_blocked_content(final_url, code),
+                        is_error=True,
+                    )
+                if _looks_like_block_url(final_url):
+                    return ToolResult(
+                        tool_name=self.name,
+                        content=_blocked_content(final_url, code),
+                        is_error=True,
+                    )
+                text = _extract_text_from_scrapling_response(response)
+                if text:
+                    if _looks_like_block_page(text):
+                        return ToolResult(
+                            tool_name=self.name,
+                            content=_blocked_content(final_url, code),
+                            is_error=True,
+                        )
+                    status_suffix = f" (status {code})" if code is not None else ""
+                    return ToolResult(
+                        tool_name=self.name,
+                        content=f"URL: {final_url}{status_suffix}\n{text[:limit]}",
                     )
                 attempts.append("Scrapling returned no readable content.")
             except Exception as exc:
@@ -251,9 +332,22 @@ class WebFetchTool(Tool):
                 follow_redirects=True,
                 verify=not insecure,
             )
-            response.raise_for_status()
-            final_url = str(getattr(response, "url", url))
+            final_url = _response_url(response, url)
+            status_code = _status_code(response)
             annotation = " [TLS verification disabled]" if insecure else ""
+            if status_code in {401, 403, 429}:
+                return ToolResult(
+                    tool_name=self.name,
+                    content=_blocked_content(final_url, status_code),
+                    is_error=True,
+                )
+            if _looks_like_block_url(final_url):
+                return ToolResult(
+                    tool_name=self.name,
+                    content=_blocked_content(final_url, status_code),
+                    is_error=True,
+                )
+            response.raise_for_status()
 
             # Prefer raw JSON when Content-Type signals it, or body parses cleanly.
             if _is_json_content_type(response.headers):
@@ -272,6 +366,12 @@ class WebFetchTool(Tool):
 
             text = _extract_text_from_html(response.text)
             if text:
+                if _looks_like_block_page(text):
+                    return ToolResult(
+                        tool_name=self.name,
+                        content=_blocked_content(final_url, status_code),
+                        is_error=True,
+                    )
                 return ToolResult(
                     tool_name=self.name,
                     content=f"URL: {final_url}{annotation}\n{text[:limit]}",

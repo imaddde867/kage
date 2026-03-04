@@ -78,6 +78,19 @@ def collect_recent_turns(
     return turns[-limit:]
 
 
+def derive_topic_hint(recent_turns: list[tuple[str, str]], *, max_chars: int = 120) -> str:
+    for user_text, _ in reversed(recent_turns):
+        cleaned = " ".join(user_text.strip().split())
+        if not cleaned:
+            continue
+        if len(cleaned) < 12:
+            continue
+        if len(cleaned) > max_chars:
+            return cleaned[: max_chars - 3].rstrip() + "..."
+        return cleaned
+    return ""
+
+
 def build_messages(
     *,
     user_input: str,
@@ -87,6 +100,7 @@ def build_messages(
     recent_turns: list[tuple[str, str]],
     policy_note: str,
     entity_context: str = "",
+    topic_hint: str = "",
 ) -> list[dict[str, str]]:
     system = build_system_prompt(user_name, text_mode=text_mode)
     if policy_note:
@@ -98,6 +112,9 @@ def build_messages(
 
     if entity_context:
         system += f"\n\nKnown facts about {user_name}:\n{entity_context}"
+
+    if topic_hint:
+        system += f"\n\nCurrent topic hint:\n{topic_hint}"
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system}]
     for user_text, reply_text in recent_turns:
@@ -123,4 +140,3 @@ def apply_chat_template(tokenizer: Any, messages: list[dict[str, str]]) -> str:
             tokenize=False,
             add_generation_prompt=True,
         )
-

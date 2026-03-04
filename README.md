@@ -77,7 +77,7 @@ Notes:
 | `MLX_MODEL`       | `mlx-community/Qwen3.5-4B-MLX-4bit` | Main model                                       |
 | `MLX_DRAFT_MODEL` | ``                                  | Optional speculative draft model (`mlx` backend) |
 | `MLX_MAX_TOKENS`  | `250`                               | Generation cap                                   |
-| `TEMPERATURE`     | `0.3`                               | Sampling temperature                             |
+| `TEMPERATURE`     | `0.3`                               | Sampling temperature for non-agent conversational responses |
 
 ### Voice / Audio
 
@@ -143,6 +143,10 @@ Notes:
 | ---------------------------- | ------- | ------------------------------------------------------- |
 | `AGENT_ENABLED`              | `true`  | Enable tool-using agent loop                            |
 | `AGENT_MAX_STEPS`            | `8`     | Max ReAct iterations per request                        |
+| `AGENT_TEMPERATURE`          | `0.0`   | Sampling temperature for tool-mode generations          |
+| `AGENT_ENTITY_MODE`          | `relevance_filtered` | Entity recall mode: `personal_only`, `relevance_filtered`, `full` |
+| `AGENT_HISTORY_CHAR_BUDGET`  | `8000`  | Max combined chars retained in agent step history       |
+| `AGENT_OBSERVATION_MAX_CHARS`| `1800`  | Per-tool-observation compression cap                    |
 | `HEARTBEAT_ENABLED`          | `true`  | Start background proactive reminder daemon (voice mode) |
 | `HEARTBEAT_INTERVAL_SECONDS` | `300`   | Heartbeat tick interval                                 |
 | `DND_START_HOUR`             | `23`    | Do-not-disturb start hour (24h)                         |
@@ -175,6 +179,7 @@ Voice mode only
 Key modules:
 
 - `core/brain.py`: orchestration and routing between classic vs agent path
+- `core/intent_signals.py`: modular weighted intent scoring used by routing/context decisions
 - `core/agent/loop.py`: multi-step tool loop
 - `core/agent/tool_registry.py`: connector dispatch
 - `connectors/*.py`: individual tool implementations

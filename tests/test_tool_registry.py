@@ -56,6 +56,38 @@ class _BrokenTool(Tool):
         raise RuntimeError("tool is broken")
 
 
+class _WebFetchDouble(Tool):
+    name = "web_fetch"
+    description = "Fetch URL"
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+            "max_chars": {"type": "integer"},
+        },
+        "required": ["url"],
+    }
+
+    def execute(self, *, url: str, max_chars: int = 0, **kwargs: Any) -> ToolResult:
+        return ToolResult(tool_name=self.name, content=f"url={url}|max_chars={max_chars}")
+
+
+class _WebSearchDouble(Tool):
+    name = "web_search"
+    description = "Search web"
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "max_results": {"type": "integer"},
+        },
+        "required": ["query"],
+    }
+
+    def execute(self, *, query: str, max_results: int = 0, **kwargs: Any) -> ToolResult:
+        return ToolResult(tool_name=self.name, content=f"query={query}|max_results={max_results}")
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -69,6 +101,8 @@ class TestToolRegistry(unittest.TestCase):
         self.registry.register(_EchoTool())
         self.registry.register(_CountTool())
         self.registry.register(_BrokenTool())
+        self.registry.register(_WebFetchDouble())
+        self.registry.register(_WebSearchDouble())
 
     def test_names_contains_registered_tools(self) -> None:
         """names() returns the tool name of every registered tool."""
@@ -101,6 +135,32 @@ class TestToolRegistry(unittest.TestCase):
         result = self.registry.execute(ToolCall(name="broken", args={}))
         self.assertTrue(result.is_error)
         self.assertIn("broken", result.content)
+
+    def test_missing_required_arg_returns_error_without_raise(self) -> None:
+        result = self.registry.execute(ToolCall(name="web_fetch", args={}))
+        self.assertTrue(result.is_error)
+        self.assertIn("requires", result.content)
+        self.assertIn("url", result.content)
+
+    def test_auto_repair_href_to_url(self) -> None:
+        result = self.registry.execute(ToolCall(name="web_fetch", args={"href": "https://example.com"}))
+        self.assertFalse(result.is_error)
+        self.assertIn("url=https://example.com", result.content)
+
+    def test_alias_name_and_numeric_string_are_repaired(self) -> None:
+        result = self.registry.execute(
+            ToolCall(name="search", args={"q": "agadir restaurants", "max_results": "7"})
+        )
+        self.assertFalse(result.is_error)
+        self.assertIn("query=agadir restaurants", result.content)
+        self.assertIn("max_results=7", result.content)
+
+    def test_invalid_tool_call_name_returns_actionable_error(self) -> None:
+        result = self.registry.execute(
+            ToolCall(name="invalid_tool_call", args={"raw": "<tool name=>"})
+        )
+        self.assertTrue(result.is_error)
+        self.assertIn("Malformed tool output", result.content)
 
     def test_schema_block_contains_tool_info(self) -> None:
         """schema_block() includes each tool's name and description for the system prompt."""

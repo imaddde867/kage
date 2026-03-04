@@ -1,35 +1,31 @@
 """Web search connector using DuckDuckGo — no API key, no account required.
 
-The duckduckgo-search library is imported once at module load time so _DDGS
-can be patched in tests without importing the package itself.
-
-Result format includes title + URL + snippet so the agent can chain:
-web_search -> web_fetch for deeper reading.
-
-Install:
-    pip install duckduckgo-search
+Returns compact JSON to keep AgentLoop observations small and machine-readable.
+This makes downstream URL selection and de-duplication more reliable.
 """
 from __future__ import annotations
 
+import json
 import warnings
 
 from core.agent.tool_base import Tool, ToolResult
 
-# Optional import — None if duckduckgo-search is not installed.
-# Keeping this at module level (rather than inside execute) makes it
-# patchable in tests via @patch("connectors.web_search._DDGS", ...).
-# DeprecationWarnings from the duckduckgo_search package (rename notices) are
-# suppressed here so they don't appear in user-facing terminal output.
-try:
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=DeprecationWarning)
-        warnings.filterwarnings("ignore", category=UserWarning)
-        from duckduckgo_search import DDGS as _DDGS  # type: ignore[import]
-except ImportError:
-    _DDGS = None  # type: ignore[assignment]
+_DDGS = None  # type: ignore[assignment]
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore")
+    try:
+        from ddgs import DDGS as _DDGS  # type: ignore[import]
+    except ImportError:
+        try:
+            from duckduckgo_search import DDGS as _DDGS  # type: ignore[import]
+        except ImportError:
+            pass
 
 _DEFAULT_RESULTS = 5
 _MAX_RESULTS = 10
+_SNIPPET_MAX_CHARS = 200
+_RESULT_TITLE_MAX_CHARS = 180
+_MAX_CONTENT_CHARS = 2500
 
 
 class WebSearchTool(Tool):
@@ -52,21 +48,30 @@ class WebSearchTool(Tool):
         "required": ["query"],
     }
 
+    def _compact_payload(self, query: str, rows: list[dict[str, str]]) -> str:
+        payload: dict[str, object] = {"query": query, "results": []}
+        for row in rows:
+            candidate = dict(payload)
+            candidate_results = list(payload["results"])  # type: ignore[index]
+            candidate_results.append(row)
+            candidate["results"] = candidate_results
+            rendered = json.dumps(candidate, ensure_ascii=False)
+            if len(rendered) > _MAX_CONTENT_CHARS:
+                break
+            payload = candidate
+
+        rendered = json.dumps(payload, ensure_ascii=False)
+        if len(rendered) <= _MAX_CONTENT_CHARS:
+            return rendered
+        return json.dumps({"query": query[:120], "results": []}, ensure_ascii=False)
+
     def execute(self, *, query: str, max_results: int = _DEFAULT_RESULTS, **kwargs) -> ToolResult:
-        """Run a DuckDuckGo text search and return title/URL/snippet lines.
-
-        Args:
-            query: The search string sent to DuckDuckGo.
-            max_results: Requested result count (clamped to 1..10).
-
-        Returns:
-            ToolResult with newline-separated bullet blocks,
-            or an error result if the library is missing or the search fails.
-        """
+        """Run a DuckDuckGo text search and return compact structured JSON."""
+        del kwargs
         if _DDGS is None:
             return ToolResult(
                 tool_name=self.name,
-                content="duckduckgo-search is not installed. Run: pip install duckduckgo-search",
+                content="DuckDuckGo search is not installed. Run: pip install ddgs",
                 is_error=True,
             )
         try:
@@ -75,25 +80,33 @@ class WebSearchTool(Tool):
             limit = _DEFAULT_RESULTS
 
         try:
-            results = list(_DDGS().text(query, max_results=limit))
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore")
+                results = list(_DDGS().text(query, max_results=limit))
         except Exception as exc:
             return ToolResult(tool_name=self.name, content=f"Search failed: {exc}", is_error=True)
 
         if not results:
-            return ToolResult(tool_name=self.name, content="No results found.")
+            return ToolResult(
+                tool_name=self.name,
+                content=json.dumps({"query": query, "results": []}, ensure_ascii=False),
+            )
 
-        lines: list[str] = []
-        for raw in results:
+        rows: list[dict[str, str]] = []
+        for idx, raw in enumerate(results, start=1):
             title = (raw.get("title") or "Untitled result").strip()
             snippet = (raw.get("body") or "").strip()
             url = (raw.get("href") or raw.get("url") or "").strip()
+            if not url:
+                continue
+            rows.append(
+                {
+                    "rank": idx,
+                    "title": title[:_RESULT_TITLE_MAX_CHARS],
+                    "url": url,
+                    "snippet": snippet[:_SNIPPET_MAX_CHARS],
+                }
+            )
 
-            parts = [f"- {title}"]
-            if url:
-                parts.append(f"  URL: {url}")
-            if snippet:
-                parts.append(f"  Snippet: {snippet}")
-            lines.append("\n".join(parts))
-
-        text = "\n".join(lines)
-        return ToolResult(tool_name=self.name, content=text)
+        payload = self._compact_payload(query=query, rows=rows)
+        return ToolResult(tool_name=self.name, content=payload)
