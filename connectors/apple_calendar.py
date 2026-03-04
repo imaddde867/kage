@@ -1,4 +1,30 @@
-"""macOS Calendar and Reminders connectors via osascript."""
+"""macOS Calendar and Reminders connectors via osascript (AppleScript bridge).
+
+Two tools are provided:
+
+    CalendarReadTool  — queries the macOS Calendar app for upcoming events
+                        in the next N days and returns them as a text list.
+
+    ReminderAddTool   — creates a new item in the macOS Reminders app with
+                        an optional due date.
+
+AppleScript bridge
+------------------
+Both tools use subprocess + osascript to drive the Calendar and Reminders
+applications.  This requires:
+  - macOS (osascript is not available on Linux/Windows).
+  - Accessibility permissions granted to whichever terminal/app runs Kage.
+
+AppleScript injection prevention
+---------------------------------
+Any user-supplied text (e.g. reminder titles) is passed through _escape_as()
+before being embedded in the AppleScript string.  _escape_as() is defined
+locally here (mirroring the implementation in notify.py) rather than shared,
+keeping each connector self-contained with no cross-connector imports.
+
+The CalendarReadTool does NOT accept user text in the AppleScript body —
+only the integer `days` parameter is interpolated, cast to int() first.
+"""
 from __future__ import annotations
 
 import subprocess
@@ -8,12 +34,33 @@ from core.agent.tool_base import Tool, ToolResult
 
 
 def _escape_as(text: str) -> str:
-    """Escape a string for use inside AppleScript double-quoted string literals."""
+    """Escape a Python string for safe embedding in an AppleScript string literal.
+
+    Only backslashes and double quotes require escaping inside AppleScript
+    double-quoted strings.  Backslashes must be doubled first to avoid
+    double-processing when the quote escape is applied.
+
+    Args:
+        text: Raw Python string to embed in AppleScript.
+
+    Returns:
+        Escaped string safe to place between AppleScript double quotes.
+    """
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _run_osascript(script: str, timeout: int = 10) -> tuple[str, bool]:
-    """Run an AppleScript snippet; return (output, is_error)."""
+    """Execute an AppleScript string and return (output, is_error).
+
+    Args:
+        script:  Complete AppleScript text to run.
+        timeout: Maximum seconds to wait before killing the process.
+
+    Returns:
+        A tuple of (output_string, is_error_bool).
+        On success: (stdout.strip(), False).
+        On failure: (error_message, True).
+    """
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
@@ -22,6 +69,7 @@ def _run_osascript(script: str, timeout: int = 10) -> tuple[str, bool]:
             timeout=timeout,
         )
         if result.returncode != 0:
+            # osascript writes error messages to stderr
             return result.stderr.strip() or "osascript returned non-zero exit code.", True
         return result.stdout.strip(), False
     except FileNotFoundError:
@@ -31,6 +79,15 @@ def _run_osascript(script: str, timeout: int = 10) -> tuple[str, bool]:
 
 
 class CalendarReadTool(Tool):
+    """Return upcoming Calendar events for the next N days.
+
+    Iterates over all calendars visible in the Calendar app and returns
+    event summaries with their start times.  Output is capped at 1500 chars
+    to keep the observation size manageable for the model.
+
+    The `days` argument is cast to int() inside the AppleScript interpolation
+    to prevent injection via a non-integer value.
+    """
     name = "calendar_read"
     description = "Read upcoming events from macOS Calendar for the next N days"
     parameters = {
@@ -42,6 +99,17 @@ class CalendarReadTool(Tool):
     }
 
     def execute(self, *, days: int = 3, **kwargs) -> ToolResult:
+        """Query Calendar for events in the next `days` days.
+
+        Args:
+            days: Look-ahead window in days.  Defaults to 3.
+
+        Returns:
+            ToolResult with one "event at datetime" line per event,
+            or a "no events found" message if the calendar is clear.
+        """
+        # int(days) cast prevents AppleScript injection if the model passes a
+        # non-integer value.  The AppleScript 'days' keyword is a time unit.
         script = f"""
 tell application "Calendar"
     set startDate to (current date)
@@ -65,6 +133,14 @@ end tell
 
 
 class ReminderAddTool(Tool):
+    """Add a new item to macOS Reminders with an optional due date.
+
+    The reminder is created in the default Reminders list.  If due_date is
+    provided it must be in ISO 8601 format (YYYY-MM-DD); malformed dates are
+    silently ignored and the reminder is created without a due date.
+
+    The title is escaped via _escape_as() before AppleScript interpolation.
+    """
     name = "reminder_add"
     description = "Add a reminder to macOS Reminders with an optional due date"
     parameters = {
@@ -77,16 +153,31 @@ class ReminderAddTool(Tool):
     }
 
     def execute(self, *, title: str, due_date: str | None = None, **kwargs) -> ToolResult:
+        """Create a Reminders item.
+
+        Args:
+            title:    The reminder text (will be escaped before AppleScript use).
+            due_date: Optional ISO 8601 date string.  If provided and valid,
+                      the due date is set on the reminder.  Invalid strings
+                      are silently skipped.
+
+        Returns:
+            ToolResult confirming the reminder was created, or an error if
+            osascript failed (e.g. permission denied, app not running).
+        """
+        # Build the optional "set due date" AppleScript clause.
         due_clause = ""
         if due_date:
             try:
                 d = date.fromisoformat(due_date)
+                # AppleScript 'date "Month DD, YYYY"' is the most portable date format.
                 due_clause = (
                     f'set due date of newReminder to date "{d.strftime("%B %d, %Y")}"'
                 )
             except ValueError:
-                pass  # silently skip malformed date
+                pass  # Silently skip — the reminder is still created without a due date
 
+        # title is escaped to prevent AppleScript injection.
         script = f"""
 tell application "Reminders"
     set newReminder to make new reminder with properties {{name:"{_escape_as(title)}"}}
