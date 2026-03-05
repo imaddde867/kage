@@ -54,7 +54,7 @@ from typing import Any
 import config
 from core.agent.parser import parse_step
 from core.agent.tool_registry import ToolRegistry
-from core.brain_guardrails import guard_answer_truthfulness
+from core.brain_guardrails import guard_answer_truthfulness, guard_temporal_uncertainty
 from core.brain_prompting import apply_chat_template
 from core.intent_signals import DEFAULT_SIGNALS
 
@@ -103,6 +103,11 @@ Rules:
 _OBSERVATION_TEMPLATE = "[Tool result from {name}]:\n{content}"
 _ANSWER_PREFIX_RE = re.compile(r"^(final answer|answer|response)\s*[:\-]\s*", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://[^\s\])>]+", re.IGNORECASE)
+# Strips <thought>, <tool>, <input> blocks that leak into the fallback answer path.
+_INTERNAL_TAGS_RE = re.compile(
+    r"<(?:thought|tool|input)>.*?</(?:thought|tool|input)>\s*",
+    re.DOTALL | re.IGNORECASE,
+)
 
 
 class AgentLoop:
@@ -360,6 +365,7 @@ class AgentLoop:
                     yield fallback
                     return
                 answer = guard_answer_truthfulness(parsed.answer, tools_used)
+                answer = guard_temporal_uncertainty(task, answer)
                 if web_successes > 0:
                     answer = self._append_sources_if_missing(answer, source_urls)
                 logger.debug(
@@ -442,7 +448,7 @@ class AgentLoop:
             # Some model responses (especially for simple tasks) skip the
             # XML format entirely.  Accept them rather than forcing a retry.
             if raw.strip():
-                plain = _ANSWER_PREFIX_RE.sub("", raw.strip())
+                plain = _ANSWER_PREFIX_RE.sub("", _INTERNAL_TAGS_RE.sub("", raw).strip())
                 if self._is_live_web_task(task) and web_attempts > 0 and web_successes == 0:
                     fallback = (
                         "I couldn't verify reliable live updates because the available sources were "
@@ -453,6 +459,7 @@ class AgentLoop:
                     yield fallback
                     return
                 answer = guard_answer_truthfulness(plain.strip(), tools_used)
+                answer = guard_temporal_uncertainty(task, answer)
                 if web_successes > 0:
                     answer = self._append_sources_if_missing(answer, source_urls)
                 logger.debug(

@@ -264,6 +264,7 @@ def parse_step(raw: str) -> ParsedStep:
             answer=None,
         )
 
-    # 9) Plain-text fallback
-    plain = raw.strip()
+    # 9) Plain-text fallback — strip internal XML tags that leaked outside a
+    # proper <answer> block so they are never shown to the user as plain text.
+    plain = _THOUGHT_RE.sub("", raw).strip()
     return ParsedStep(thought=thought, tool_call=None, answer=plain if plain else None)

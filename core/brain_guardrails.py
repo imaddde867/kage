@@ -109,6 +109,52 @@ _CALENDAR_CLAIM_RE = re.compile(
 _CALENDAR_TOOLS = frozenset({"calendar_read", "reminder_add"})
 
 
+_FUTURE_QUESTION_RE = re.compile(
+    r"\b(will|would|going to|forecast|predict|"
+    r"next\s+(week|month|year|quarter)|"
+    r"by\s+20\d\d|in\s+20\d\d|"
+    r"future|projection|expected\s+to)\b",
+    re.IGNORECASE,
+)
+_FUTURE_DATE_RE = re.compile(
+    r"\b20[2-9]\d[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])\b"
+)
+_PRESENT_TENSE_ANSWER_RE = re.compile(
+    r"\b(is|are|currently|today|now|at\s+the\s+moment|as\s+of)\b",
+    re.IGNORECASE,
+)
+
+
+def guard_temporal_uncertainty(task: str, answer: str) -> str:
+    """Append an uncertainty note when a future-date question is answered
+    with present-tense data retrieved from a live source.
+
+    This catches cases like "What will EUR/USD be on 2026-04-15?" answered
+    with a freshly-fetched current rate without any caveat.
+
+    Args:
+        task:   The original user question.
+        answer: The final answer string from the agent.
+
+    Returns:
+        The original answer, or the answer with a temporal disclaimer appended.
+    """
+    task_has_future = _FUTURE_QUESTION_RE.search(task) or _FUTURE_DATE_RE.search(task)
+    if not task_has_future:
+        return answer
+    if _PRESENT_TENSE_ANSWER_RE.search(answer) and not re.search(
+        r"\b(can'?t|cannot|uncertain|predict|forecast|estimate|approximate|varies|fluctuat)\b",
+        answer,
+        re.IGNORECASE,
+    ):
+        note = (
+            "(Note: this reflects the current value — "
+            "the future value cannot be predicted with certainty.)"
+        )
+        return answer.rstrip() + "\n\n" + note
+    return answer
+
+
 def guard_answer_truthfulness(answer: str, tools_used: AbstractSet[str]) -> str:
     """Append a sourcing note when the answer claims external lookups without tool evidence.
 
