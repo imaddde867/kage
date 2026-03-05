@@ -33,12 +33,16 @@ _ALLOWED: frozenset[str] = frozenset({
     "ls",     # list directory contents
     "cat",    # print file contents
     "mkdir",  # create directories
-    "mv",     # rename/move files
-    "cp",     # copy files
+    "cp",     # copy files (read-only use; destructive flags are blocked below)
     "open",   # open a file or application (macOS)
     "pwd",    # print working directory
     "echo",   # print a string
     "date",   # print current date/time
+})
+
+# Flags that can cause irreversible data loss even on allowlisted commands.
+_DESTRUCTIVE_FLAGS: frozenset[str] = frozenset({
+    "-rf", "-fr", "-f", "--force", "--delete", "-delete", "--remove",
 })
 
 
@@ -90,7 +94,16 @@ class ShellTool(Tool):
                 is_error=True,
             )
 
-        # Layer 2: block shell metacharacters in the raw command string.
+        # Layer 2a: block destructive flags on any allowed command.
+        for part in parts[1:]:
+            if part in _DESTRUCTIVE_FLAGS:
+                return ToolResult(
+                    tool_name=self.name,
+                    content=f"Flag '{part}' is not allowed — it can cause irreversible data loss.",
+                    is_error=True,
+                )
+
+        # Layer 2b: block shell metacharacters in the raw command string.
         # These are checked on the original string (not the parsed parts) to
         # catch cases where a metachar appears quoted — we reject conservatively.
         for char in ("|", ">", "<", "&", ";", "`", "$"):

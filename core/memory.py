@@ -179,7 +179,7 @@ class MemoryStore:
 
             phrase_bonus = 2 if query_phrase and query_phrase in haystack else 0
             recency_bonus = max(0.0, 1.0 - (idx / max(len(rows), 1)))
-            score = (overlap * 3) + phrase_bonus + recency_bonus
+            score = (overlap * 3) + phrase_bonus + (recency_bonus * 3)
             matches.append((score, user_text, reply_text))
 
         matches.sort(key=lambda x: x[0], reverse=True)
