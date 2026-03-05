@@ -16,12 +16,27 @@ from core.brain_guardrails import (
     deterministic_response,
     update_policy_state,
 )
-from core.brain_prompting import apply_chat_template, build_messages, build_system_prompt, collect_recent_turns
+from core.brain_prompting import (
+    apply_chat_template,
+    build_messages,
+    build_system_prompt,
+    collect_recent_turns,
+    derive_topic_hint,
+)
+from core.intent_signals import DEFAULT_SIGNALS
 from core.memory import MemoryStore
 
 logger = logging.getLogger(__name__)
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+|(?<=[.!?])$")
+_ROUTING_SIGNAL_WEIGHTS: dict[str, float] = {
+    "capability_query": -2.0,
+    "calendar_lookup": 2.0,
+    "live_web": 1.5,
+    "needs_tools": 1.0,
+}
+_ROUTING_SCORE_TOOLS_THRESHOLD = 1.0
+_ROUTING_SCORE_NO_TOOLS_THRESHOLD = -1.0
 
 
 class BrainService:
@@ -85,7 +100,7 @@ class BrainService:
 
         Optional connectors (registered when extra packages are installed;
         silently skipped with a debug log if the import fails):
-            web_fetch         — requires httpx + trafilatura
+            web_fetch         — prefers scrapling[fetchers], falls back to httpx
             shell             — no extra deps, always available
             calendar_read     — macOS only (osascript)
             reminder_add      — macOS only (osascript)
@@ -114,7 +129,7 @@ class BrainService:
             from connectors.web_fetch import WebFetchTool
             registry.register(WebFetchTool())
         except ImportError:
-            logger.debug("web_fetch unavailable (install httpx + trafilatura to enable)")
+            logger.debug('web_fetch unavailable (install "scrapling[fetchers]" + httpx to enable)')
 
         try:
             from connectors.shell import ShellTool
@@ -172,7 +187,26 @@ class BrainService:
             recent_turns=recent_turns,
             policy_note=policy_note,
             entity_context=entity_context,
+            topic_hint=derive_topic_hint(recent_turns),
         )
+
+    def _wants_task_context(self, user_input: str) -> bool:
+        return DEFAULT_SIGNALS.has(user_input, "task_context")
+
+    def _agent_entity_context(self, user_input: str) -> str:
+        if not hasattr(self, "_entity_store"):
+            return ""
+
+        mode = str(getattr(self.settings, "agent_entity_mode", "relevance_filtered")).strip().lower()
+        budget = getattr(self.settings, "entity_recall_budget", 400)
+
+        if mode == "full":
+            return self._entity_store.recall_for_prompt(char_budget=budget)
+        if mode == "personal_only":
+            return self._entity_store.recall_personal_context()
+        if self._wants_task_context(user_input):
+            return self._entity_store.recall_for_prompt(char_budget=budget)
+        return self._entity_store.recall_personal_context()
 
     def _build_prompt(self, user_input: str, *, text_mode: bool, route: Any = None) -> str:
         return apply_chat_template(
@@ -258,10 +292,22 @@ class BrainService:
         routing call fast.
         """
         system = (
-            "You are a routing classifier. Answer with a single word: 'yes' or 'no'.\n"
-            "Output 'yes' if the request requires using external tools such as web search, "
-            "calendar, shell commands, or memory operations.\n"
-            "Output 'no' if it is a simple conversational question answerable from knowledge alone."
+            "You are a routing classifier. Reply with exactly one word: 'yes' or 'no'.\n\n"
+            "Output 'yes' if the user request requires external tools such as:\n"
+            "  - Web search or fetching URLs\n"
+            "  - Calendar or reminder operations\n"
+            "  - Shell commands or system information\n"
+            "  - Memory write operations (storing facts or tasks)\n"
+            "  - Time-sensitive facts, current events, prices, or live data\n\n"
+            "Output 'no' only for simple conversational questions answerable from knowledge alone.\n\n"
+            "Examples:\n"
+            "  'What is 2+2?' → no\n"
+            "  'Search for the latest Bitcoin price' → yes\n"
+            "  'Add a reminder to call mom tomorrow' → yes\n"
+            "  'What events do I have today?' → yes\n"
+            "  'Who wrote Hamlet?' → no\n"
+            "  'Run ls in my home folder' → yes\n"
+            "  'What is the weather right now?' → yes"
         )
         messages = [
             {"role": "system", "content": system},
@@ -269,22 +315,61 @@ class BrainService:
         ]
         return apply_chat_template(self._runtime.tokenizer, messages)
 
+    def _capability_response(self, user_input: str) -> str | None:
+        registry = getattr(self, "_tool_registry", None)
+        if registry is None:
+            return None
+        if not DEFAULT_SIGNALS.has(user_input, "capability_query"):
+            return None
+        names = registry.names()
+        if not names:
+            return "I don't have any connectors enabled right now."
+        tool_list = ", ".join(names)
+        return (
+            f"I can use these connectors right now: {tool_list}. "
+            "I can run them through the agent path whenever a request needs external data or actions."
+        )
+
+    def _heuristic_needs_tools(self, user_input: str) -> bool | None:
+        text = user_input.strip()
+        if not text:
+            return False
+        score = DEFAULT_SIGNALS.weighted_score(text, _ROUTING_SIGNAL_WEIGHTS)
+        if score >= _ROUTING_SCORE_TOOLS_THRESHOLD:
+            return True
+        if score <= _ROUTING_SCORE_NO_TOOLS_THRESHOLD:
+            return False
+        return None
+
     def _needs_tools(self, user_input: str) -> bool:
         """Ask the LLM whether this request requires tool use.
 
-        Caps generation at 8 tokens (enough for "yes" or "no" plus any BOS/EOS
-        tokens) to minimise added latency.  track_stats=False avoids overwriting
-        brain.last_stats, which is used by the timing display in main.py.
+        Generates at temperature=0 for deterministic output.  Retries once on
+        ambiguous output (neither 'yes' nor 'no') then defaults to True so
+        explicit tool requests are never silently dropped.
 
-        Returns True when the LLM's answer starts with "yes" (case-insensitive).
-        Any other output (including empty strings) is treated as False so the
-        fast conversational path is used by default.
+        track_stats=False avoids overwriting brain.last_stats used by main.py.
         """
+        heuristic = self._heuristic_needs_tools(user_input)
+        if heuristic is not None:
+            return heuristic
+
         prompt = self._routing_prompt(user_input)
-        answer = "".join(
-            self._runtime.stream_raw(prompt, max_tokens=8, track_stats=False)
-        ).strip().lower()
-        return answer.startswith("yes")
+        for attempt in range(2):
+            answer = "".join(
+                self._runtime.stream_raw(
+                    prompt, max_tokens=8, track_stats=False, temperature=0.0
+                )
+            ).strip().lower()
+            if answer.startswith("yes"):
+                return True
+            if answer.startswith("no"):
+                return False
+            logger.debug(
+                "Routing attempt %d inconclusive (got %r) — retrying", attempt + 1, answer
+            )
+        logger.debug("Routing inconclusive after retry — defaulting to tools")
+        return True
 
     def agent_stream(self, user_input: str) -> Iterator[str]:
         """Run the agentic multi-step path for a single user request.
@@ -298,11 +383,11 @@ class BrainService:
         """
         assert self._agent_loop is not None
         self._update_policy_state(user_input)
-        entity_context = ""
-        if hasattr(self, "_entity_store"):
-            entity_context = self._entity_store.recall_for_prompt(
-                char_budget=getattr(self.settings, "entity_recall_budget", 400)
-            )
+        entity_context = self._agent_entity_context(user_input)
+        topic_hint = derive_topic_hint(self._collect_recent_turns())
+        if topic_hint:
+            topic_line = f"Conversation topic: {topic_hint}"
+            entity_context = f"{entity_context}\n{topic_line}".strip() if entity_context else topic_line
         parts: list[str] = []
         for chunk in self._agent_loop.run(user_input, context=entity_context):
             parts.append(chunk)
@@ -311,6 +396,12 @@ class BrainService:
         self._persist_exchange(user_input, reply)
 
     def think_stream(self, user_input: str) -> Iterator[str]:
+        capability = self._capability_response(user_input)
+        if capability:
+            yield capability
+            self._persist_exchange(user_input, capability)
+            return
+
         # Routing check: if the agent is enabled and the LLM decides this
         # request needs tools, delegate to the agentic path immediately.
         # The fast conversational path continues below when tools are not needed.
@@ -343,6 +434,12 @@ class BrainService:
                 yield suggestion
 
     def think_text_stream(self, user_input: str) -> Iterator[str]:
+        capability = self._capability_response(user_input)
+        if capability:
+            yield capability
+            self._persist_exchange(user_input, capability)
+            return
+
         # Same routing check as think_stream — text mode also benefits from
         # the agentic path when tool use is needed.
         if self._agent_loop is not None and self._needs_tools(user_input):

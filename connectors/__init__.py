@@ -9,7 +9,7 @@ web_search.py       DuckDuckGo text search, no API key.
                     Requires: pip install duckduckgo-search
 
 web_fetch.py        Fetch a URL and extract readable text.
-                    Requires: pip install httpx trafilatura
+                    Requires: pip install "scrapling[fetchers]" httpx trafilatura
 
 memory_ops.py       Read/write EntityStore from agent turns:
                       mark_task_done  — mark a task or commitment as done

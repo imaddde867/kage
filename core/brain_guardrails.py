@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Set as AbstractSet
 
 _HONESTY_RE = re.compile(r"\balways be honest\b|\bstraight with me\b", re.IGNORECASE)
 _ALWAYS_YES_RE = re.compile(
@@ -87,4 +88,98 @@ def deterministic_response(
         )
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Truthfulness guard
+# ---------------------------------------------------------------------------
+
+_WEB_CLAIM_RE = re.compile(
+    r"\b(I searched|searched the web|I looked (it |that )?up|I found online|"
+    r"according to (my )?search|based on (my )?search|I fetched|I retrieved from the web)\b",
+    re.IGNORECASE,
+)
+_WEB_TOOLS = frozenset({"web_search", "web_fetch"})
+
+_CALENDAR_CLAIM_RE = re.compile(
+    r"\b(I checked (your |the )?calendar|according to (your |the )?calendar|"
+    r"I found (in |on )?your calendar)\b",
+    re.IGNORECASE,
+)
+_CALENDAR_TOOLS = frozenset({"calendar_read", "reminder_add"})
+
+
+_FUTURE_QUESTION_RE = re.compile(
+    r"\b(will|would|going to|forecast|predict|"
+    r"next\s+(week|month|year|quarter)|"
+    r"by\s+20\d\d|in\s+20\d\d|"
+    r"future|projection|expected\s+to)\b",
+    re.IGNORECASE,
+)
+_FUTURE_DATE_RE = re.compile(
+    r"\b20[2-9]\d[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])\b"
+)
+_PRESENT_TENSE_ANSWER_RE = re.compile(
+    r"\b(is|are|currently|today|now|at\s+the\s+moment|as\s+of)\b",
+    re.IGNORECASE,
+)
+
+
+def guard_temporal_uncertainty(task: str, answer: str) -> str:
+    """Append an uncertainty note when a future-date question is answered
+    with present-tense data retrieved from a live source.
+
+    This catches cases like "What will EUR/USD be on 2026-04-15?" answered
+    with a freshly-fetched current rate without any caveat.
+
+    Args:
+        task:   The original user question.
+        answer: The final answer string from the agent.
+
+    Returns:
+        The original answer, or the answer with a temporal disclaimer appended.
+    """
+    task_has_future = _FUTURE_QUESTION_RE.search(task) or _FUTURE_DATE_RE.search(task)
+    if not task_has_future:
+        return answer
+    if _PRESENT_TENSE_ANSWER_RE.search(answer) and not re.search(
+        r"\b(can'?t|cannot|uncertain|predict|forecast|estimate|approximate|varies|fluctuat)\b",
+        answer,
+        re.IGNORECASE,
+    ):
+        note = (
+            "(Note: this reflects the current value — "
+            "the future value cannot be predicted with certainty.)"
+        )
+        return answer.rstrip() + "\n\n" + note
+    return answer
+
+
+def guard_answer_truthfulness(answer: str, tools_used: AbstractSet[str]) -> str:
+    """Append a sourcing note when the answer claims external lookups without tool evidence.
+
+    Called by AgentLoop after extracting a final <answer>.  If the answer text
+    claims a web search or calendar check was performed but neither tool was
+    actually invoked in this loop run, a brief disclaimer is appended so the
+    user knows the response is based on training knowledge, not live data.
+
+    Args:
+        answer:     The final answer string from the agent.
+        tools_used: Set of tool names actually called during this loop run.
+
+    Returns:
+        The original answer, or the answer with a disclaimer appended.
+    """
+    notes: list[str] = []
+    if _WEB_CLAIM_RE.search(answer) and not (tools_used & _WEB_TOOLS):
+        notes.append(
+            "(Note: no live web search was performed — this answer is from training knowledge.)"
+        )
+    if _CALENDAR_CLAIM_RE.search(answer) and not (tools_used & _CALENDAR_TOOLS):
+        notes.append(
+            "(Note: no calendar data was accessed — this answer is from training knowledge.)"
+        )
+    if notes:
+        return answer.rstrip() + "\n\n" + " ".join(notes)
+    return answer
 

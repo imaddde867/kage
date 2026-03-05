@@ -130,6 +130,47 @@ class TestParseStep(unittest.TestCase):
         self.assertEqual(step.tool_call.name, "list_open_tasks")
         self.assertEqual(step.tool_call.args, {})
 
+    def test_web_fetch_with_json_input(self):
+        raw = '<tool>web_fetch</tool><input>{"url":"https://x"}</input>'
+        step = parse_step(raw)
+        self.assertIsNotNone(step.tool_call)
+        self.assertEqual(step.tool_call.name, "web_fetch")
+        self.assertEqual(step.tool_call.args.get("url"), "https://x")
+
+    def test_tool_body_inline_attrs(self):
+        raw = '<tool>web_fetch url="https://x"</tool>'
+        step = parse_step(raw)
+        self.assertIsNotNone(step.tool_call)
+        self.assertEqual(step.tool_call.name, "web_fetch")
+        self.assertEqual(step.tool_call.args.get("url"), "https://x")
+
+    def test_tool_name_attribute_form(self):
+        raw = '<tool name="web_search" query="agadir things to do" />'
+        step = parse_step(raw)
+        self.assertIsNotNone(step.tool_call)
+        self.assertEqual(step.tool_call.name, "web_search")
+        self.assertEqual(step.tool_call.args.get("query"), "agadir things to do")
+
+    def test_tool_open_inline_without_closing_tag(self):
+        raw = '<tool>web_fetch url="https://example.com">'
+        step = parse_step(raw)
+        self.assertIsNotNone(step.tool_call)
+        self.assertEqual(step.tool_call.name, "web_fetch")
+        self.assertEqual(step.tool_call.args.get("url"), "https://example.com")
+
+    def test_malformed_tool_like_output_routes_to_invalid_tool_call(self):
+        raw = "<tool name=>"
+        step = parse_step(raw)
+        self.assertIsNotNone(step.tool_call)
+        self.assertEqual(step.tool_call.name, "invalid_tool_call")
+        self.assertIn("raw", step.tool_call.args)
+
+    def test_web_fetch_without_input_yields_empty_args_for_registry_validation(self):
+        step = parse_step("<tool>web_fetch</tool>")
+        self.assertIsNotNone(step.tool_call)
+        self.assertEqual(step.tool_call.name, "web_fetch")
+        self.assertEqual(step.tool_call.args, {})
+
     def test_return_type_is_parsed_step(self):
         """parse_step always returns a ParsedStep dataclass instance."""
         self.assertIsInstance(parse_step("<answer>hi</answer>"), ParsedStep)

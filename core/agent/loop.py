@@ -42,7 +42,11 @@ Extending the loop
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
+import time
+from collections import Counter
 from collections.abc import Iterator
 from datetime import date
 from typing import Any
@@ -50,7 +54,9 @@ from typing import Any
 import config
 from core.agent.parser import parse_step
 from core.agent.tool_registry import ToolRegistry
+from core.brain_guardrails import guard_answer_truthfulness, guard_temporal_uncertainty
 from core.brain_prompting import apply_chat_template
+from core.intent_signals import DEFAULT_SIGNALS
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +88,10 @@ Available tools:
 Rules:
 - One tool per step
 - Keep answers concise and natural for speech
+- For online research, prefer web_search first, then web_fetch on relevant URLs
+- Do not fetch more than 2 URLs in one request
+- When reporting web facts, always cite the source URL in your answer
+- Do not claim to have searched or fetched data unless a tool result supports it
 - If a tool fails, try an alternative or explain the limitation
 - Max {max_steps} steps
 
@@ -91,6 +101,13 @@ Rules:
 # "user" message.  The model sees this text in the next generation step and
 # uses it to decide whether to call another tool or produce a final answer.
 _OBSERVATION_TEMPLATE = "[Tool result from {name}]:\n{content}"
+_ANSWER_PREFIX_RE = re.compile(r"^(final answer|answer|response)\s*[:\-]\s*", re.IGNORECASE)
+_URL_RE = re.compile(r"https?://[^\s\])>]+", re.IGNORECASE)
+# Strips <thought>, <tool>, <input> blocks that leak into the fallback answer path.
+_INTERNAL_TAGS_RE = re.compile(
+    r"<(?:thought|tool|input)>.*?</(?:thought|tool|input)>\s*",
+    re.DOTALL | re.IGNORECASE,
+)
 
 
 class AgentLoop:
@@ -185,13 +202,94 @@ class AgentLoop:
         by the timing display in main.py.
         """
         chunks: list[str] = []
+        temperature = float(getattr(self._settings, "agent_temperature", 0.0))
         for chunk in self._runtime.stream_raw(
             prompt,
             max_tokens=self._settings.mlx_max_tokens,
             track_stats=False,
+            temperature=temperature,
         ):
             chunks.append(chunk)
         return "".join(chunks)
+
+    def _compress_observation(self, tool_name: str, content: str) -> str:
+        max_chars = int(getattr(self._settings, "agent_observation_max_chars", 1800))
+        max_chars = max(500, max_chars)
+        text = content.strip()
+        if not text:
+            return ""
+
+        if tool_name == "web_search":
+            try:
+                payload = json.loads(text)
+                if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                    compact_results: list[dict[str, Any]] = []
+                    for item in payload["results"][:3]:
+                        if not isinstance(item, dict):
+                            continue
+                        compact: dict[str, Any] = {}
+                        rank = item.get("rank")
+                        if isinstance(rank, int):
+                            compact["rank"] = rank
+                        title = str(item.get("title", "")).strip()
+                        if title:
+                            compact["title"] = title[:120]
+                        url = str(item.get("url", "")).strip()
+                        if url:
+                            compact["url"] = url
+                        snippet = str(item.get("snippet", "")).strip()
+                        if snippet:
+                            compact["snippet"] = snippet[:120]
+                        if compact:
+                            compact_results.append(compact)
+                    compact_payload = {"results": compact_results}
+                    text = json.dumps(compact_payload, ensure_ascii=False)
+            except Exception:
+                pass
+
+        if tool_name == "web_fetch":
+            lines = text.splitlines()
+            url_line = lines[0].strip() if lines else ""
+            if url_line.lower().startswith("url:"):
+                body = " ".join(line.strip() for line in lines[1:] if line.strip())
+                if body:
+                    text = f"{url_line}\n{body}"
+                else:
+                    text = url_line
+
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 3].rstrip() + "..."
+
+    def _history_chars(self, history: list[tuple[str, str]]) -> int:
+        return sum(len(a) + len(b) for a, b in history)
+
+    def _append_history(
+        self, history: list[tuple[str, str]], assistant_raw: str, tool_name: str, content: str
+    ) -> None:
+        observation = _OBSERVATION_TEMPLATE.format(
+            name=tool_name,
+            content=self._compress_observation(tool_name, content),
+        )
+        history.append((assistant_raw, observation))
+        budget = int(getattr(self._settings, "agent_history_char_budget", 8000))
+        budget = max(1000, budget)
+        while history and self._history_chars(history) > budget:
+            history.pop(0)
+
+    def _extract_urls(self, text: str) -> list[str]:
+        return _URL_RE.findall(text)
+
+    def _is_live_web_task(self, task: str) -> bool:
+        return DEFAULT_SIGNALS.has(task, "live_web")
+
+    def _append_sources_if_missing(self, answer: str, source_urls: list[str]) -> str:
+        if not source_urls:
+            return answer
+        if _URL_RE.search(answer):
+            return answer
+        joined = ", ".join(source_urls[:3])
+        return f"{answer.rstrip()}\n\nSources: {joined}"
 
     # ------------------------------------------------------------------
     # Main loop
@@ -221,13 +319,34 @@ class AgentLoop:
         if max_steps is None:
             max_steps = self._settings.agent_max_steps
 
+        started_at = time.perf_counter()
         system = self._system_prompt(entity_context=context, max_steps=max_steps)
         # history grows as (assistant_output, observation) pairs each step
         history: list[tuple[str, str]] = []
+        # Track (tool_name, canonical_args) call counts to detect infinite loops
+        tool_call_counts: Counter[tuple[str, str]] = Counter()
+        # Track which tool names were actually invoked (for truthfulness guard)
+        tools_used: set[str] = set()
+        fetched_urls: set[str] = set()
+        fetch_count = 0
+        tool_calls = 0
+        total_prompt_chars = 0
+        web_attempts = 0
+        web_successes = 0
+        source_urls: list[str] = []
 
         for step_num in range(max_steps):
             logger.debug("AgentLoop step %d/%d", step_num + 1, max_steps)
             prompt = self._build_prompt(system, task, history)
+            total_prompt_chars += len(prompt)
+            logger.debug(
+                "AgentLoop metrics step=%d prompt_chars=%d history_chars=%d tool_calls=%d web_fetches=%d",
+                step_num + 1,
+                len(prompt),
+                self._history_chars(history),
+                tool_calls,
+                fetch_count,
+            )
             raw = self._generate(prompt)
             parsed = parse_step(raw)
 
@@ -236,7 +355,28 @@ class AgentLoop:
 
             # --- Final answer: yield and exit ---
             if parsed.answer is not None:
-                yield parsed.answer
+                if self._is_live_web_task(task) and web_attempts > 0 and web_successes == 0:
+                    fallback = (
+                        "I couldn't verify reliable live updates because the available sources were "
+                        "blocked or returned unusable pages."
+                    )
+                    if source_urls:
+                        fallback += f" Sources checked: {', '.join(source_urls[:3])}."
+                    yield fallback
+                    return
+                answer = guard_answer_truthfulness(parsed.answer, tools_used)
+                answer = guard_temporal_uncertainty(task, answer)
+                if web_successes > 0:
+                    answer = self._append_sources_if_missing(answer, source_urls)
+                logger.debug(
+                    "AgentLoop completed in %.0fms (steps=%d tool_calls=%d web_fetches=%d total_prompt_chars=%d)",
+                    (time.perf_counter() - started_at) * 1000,
+                    step_num + 1,
+                    tool_calls,
+                    fetch_count,
+                    total_prompt_chars,
+                )
+                yield answer
                 return
 
             # --- Tool call: execute, record observation, loop again ---
@@ -244,24 +384,101 @@ class AgentLoop:
                 logger.debug(
                     "Tool call: %s(%s)", parsed.tool_call.name, parsed.tool_call.args
                 )
+                # Detect repeated identical calls to break infinite fetch loops.
+                call_key = (
+                    parsed.tool_call.name,
+                    json.dumps(parsed.tool_call.args, sort_keys=True),
+                )
+                tool_call_counts[call_key] += 1
+                if tool_call_counts[call_key] >= 3:
+                    logger.warning(
+                        "Repeated tool call detected (%s x3) — forcing answer", call_key[0]
+                    )
+                    logger.debug(
+                        "AgentLoop bailed after repeated calls (tool_calls=%d total_prompt_chars=%d)",
+                        tool_calls,
+                        total_prompt_chars,
+                    )
+                    yield (
+                        "I kept retrieving the same data without making progress. "
+                        "I don't have a reliable answer for that right now."
+                    )
+                    return
+
+                if parsed.tool_call.name == "web_fetch":
+                    fetch_url = str(parsed.tool_call.args.get("url", "")).strip()
+                    if fetch_url and fetch_url in fetched_urls:
+                        self._append_history(
+                            history,
+                            raw,
+                            "web_fetch",
+                            f"Already fetched {fetch_url} earlier in this request. Use the previous result.",
+                        )
+                        continue
+                    if fetch_count >= 2:
+                        self._append_history(
+                            history,
+                            raw,
+                            "web_fetch",
+                            "Fetch limit reached (2 URLs). Synthesize a final answer now using the data already fetched.",
+                        )
+                        continue
+                    if fetch_url:
+                        fetched_urls.add(fetch_url)
+                    fetch_count += 1
+
                 result = self._registry.execute(parsed.tool_call)
+                tool_calls += 1
+                tools_used.add(result.tool_name)
+                if result.tool_name in {"web_search", "web_fetch"}:
+                    web_attempts += 1
+                    urls = self._extract_urls(result.content)
+                    for url in urls:
+                        if url not in source_urls:
+                            source_urls.append(url)
+                    if not result.is_error and urls:
+                        web_successes += 1
                 logger.debug(
                     "Tool result (error=%s): %s", result.is_error, result.content[:200]
                 )
-                # Format the result as an observation string that the model
-                # will see in the "user" role on the next iteration.
-                observation = _OBSERVATION_TEMPLATE.format(
-                    name=result.tool_name, content=result.content
-                )
-                history.append((raw, observation))
+                self._append_history(history, raw, result.tool_name, result.content)
                 continue
 
             # --- No XML tags: treat raw text as a plain answer ---
             # Some model responses (especially for simple tasks) skip the
             # XML format entirely.  Accept them rather than forcing a retry.
             if raw.strip():
-                yield raw.strip()
+                plain = _ANSWER_PREFIX_RE.sub("", _INTERNAL_TAGS_RE.sub("", raw).strip())
+                if self._is_live_web_task(task) and web_attempts > 0 and web_successes == 0:
+                    fallback = (
+                        "I couldn't verify reliable live updates because the available sources were "
+                        "blocked or returned unusable pages."
+                    )
+                    if source_urls:
+                        fallback += f" Sources checked: {', '.join(source_urls[:3])}."
+                    yield fallback
+                    return
+                answer = guard_answer_truthfulness(plain.strip(), tools_used)
+                answer = guard_temporal_uncertainty(task, answer)
+                if web_successes > 0:
+                    answer = self._append_sources_if_missing(answer, source_urls)
+                logger.debug(
+                    "AgentLoop plain-text completion in %.0fms (steps=%d tool_calls=%d total_prompt_chars=%d)",
+                    (time.perf_counter() - started_at) * 1000,
+                    step_num + 1,
+                    tool_calls,
+                    total_prompt_chars,
+                )
+                yield answer
                 return
 
         # Exhausted all steps without a final answer.
+        logger.debug(
+            "AgentLoop hit max steps in %.0fms (max_steps=%d tool_calls=%d web_fetches=%d total_prompt_chars=%d)",
+            (time.perf_counter() - started_at) * 1000,
+            max_steps,
+            tool_calls,
+            fetch_count,
+            total_prompt_chars,
+        )
         yield "I reached the step limit without a final answer. Please try rephrasing your request."
