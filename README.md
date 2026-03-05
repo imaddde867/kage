@@ -25,7 +25,7 @@ Kage currently runs three layers:
 | STT fallback | [faster-whisper](https://github.com/guillaumekleeven/faster-whisper)                           | Local fallback                           |
 | TTS          | [mlx-audio](https://github.com/Blaizzy/mlx-audio) + Kokoro-82M                                 | Local speech synthesis                   |
 | Memory       | SQLite                                                                                         | Durable local storage                    |
-| Web tools    | `duckduckgo-search`, `httpx`, `trafilatura`                                                    | Agent web search + page fetch connectors |
+| Web tools    | `duckduckgo-search`, `scrapling[fetchers]`, `httpx`, `trafilatura`                             | Agent web search + adaptive page fetch    |
 
 ## Setup
 
@@ -52,8 +52,8 @@ python3 main.py          # voice mode
 
 When `AGENT_ENABLED=true`, the agent can use these tools via `ToolRegistry`:
 
-- `web_search`: DuckDuckGo text search (`duckduckgo-search`)
-- `web_fetch`: fetch URL and extract readable content (`httpx`, `trafilatura`)
+- `web_search`: DuckDuckGo text search with source URLs (`duckduckgo-search`)
+- `web_fetch`: Scrapling-first URL fetch + readable extraction with safe fallback (`scrapling[fetchers]`, `httpx`, `trafilatura`)
 - `shell`: allowlisted local shell commands only
 - `notify`: macOS notification via `osascript`
 - `speak`: direct TTS output
@@ -65,6 +65,7 @@ Notes:
 
 - Calendar/Reminders/notifications require macOS and AppleScript permissions.
 - `shell` is restricted to a small allowlist and blocks pipes/redirection/operators.
+- `web_fetch` prefers Scrapling fetchers and falls back to `httpx` if needed.
 
 ## Configuration (`.env`)
 
@@ -76,7 +77,7 @@ Notes:
 | `MLX_MODEL`       | `mlx-community/Qwen3.5-4B-MLX-4bit` | Main model                                       |
 | `MLX_DRAFT_MODEL` | ``                                  | Optional speculative draft model (`mlx` backend) |
 | `MLX_MAX_TOKENS`  | `250`                               | Generation cap                                   |
-| `TEMPERATURE`     | `0.3`                               | Sampling temperature                             |
+| `TEMPERATURE`     | `0.3`                               | Sampling temperature for non-agent conversational responses |
 
 ### Voice / Audio
 
@@ -142,10 +143,20 @@ Notes:
 | ---------------------------- | ------- | ------------------------------------------------------- |
 | `AGENT_ENABLED`              | `true`  | Enable tool-using agent loop                            |
 | `AGENT_MAX_STEPS`            | `8`     | Max ReAct iterations per request                        |
+| `AGENT_TEMPERATURE`          | `0.0`   | Sampling temperature for tool-mode generations          |
+| `AGENT_ENTITY_MODE`          | `relevance_filtered` | Entity recall mode: `personal_only`, `relevance_filtered`, `full` |
+| `AGENT_HISTORY_CHAR_BUDGET`  | `8000`  | Max combined chars retained in agent step history       |
+| `AGENT_OBSERVATION_MAX_CHARS`| `1800`  | Per-tool-observation compression cap                    |
 | `HEARTBEAT_ENABLED`          | `true`  | Start background proactive reminder daemon (voice mode) |
 | `HEARTBEAT_INTERVAL_SECONDS` | `300`   | Heartbeat tick interval                                 |
 | `DND_START_HOUR`             | `23`    | Do-not-disturb start hour (24h)                         |
 | `DND_END_HOUR`               | `7`     | Do-not-disturb end hour (24h)                           |
+| `WEB_FETCH_TLS_MODE`         | `strict` | TLS policy for `web_fetch`: `strict` or `allow_insecure_fallback` |
+| `WEB_FETCH_INSECURE_FALLBACK_DOMAINS` | `` | CSV allowlist of trusted domains permitted for insecure fallback |
+| `WEB_FETCH_TLS_RETRY_WITH_CERTIFI` | `true` | Retry SSL failures once using certifi CA bundle before insecure fallback |
+| `CALENDAR_READ_TIMEOUT_SECONDS` | `10` | Per-attempt timeout for `calendar_read` AppleScript call |
+| `CALENDAR_READ_RETRY_COUNT`  | `1`     | Retry count for timeout-only `calendar_read` failures   |
+| `CALENDAR_READ_RETRY_DELAY_SECONDS` | `0.4` | Delay between `calendar_read` timeout retries           |
 
 ## Architecture
 
@@ -174,6 +185,7 @@ Voice mode only
 Key modules:
 
 - `core/brain.py`: orchestration and routing between classic vs agent path
+- `core/intent_signals.py`: modular weighted intent scoring used by routing/context decisions
 - `core/agent/loop.py`: multi-step tool loop
 - `core/agent/tool_registry.py`: connector dispatch
 - `connectors/*.py`: individual tool implementations
@@ -189,7 +201,7 @@ Run the test suite:
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Current suite size (as of 2026-03-04): 143 tests.
+Current suite size (as of 2026-03-05): 220 tests.
 
 Useful sanity checks:
 

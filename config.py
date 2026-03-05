@@ -127,6 +127,10 @@ class Settings:
     # all others continue on the existing fast conversational path unchanged.
     agent_enabled: bool             # AGENT_ENABLED — master switch; False disables all tool use
     agent_max_steps: int            # AGENT_MAX_STEPS — hard cap on ReAct iterations per request
+    agent_temperature: float        # AGENT_TEMPERATURE — sampling temperature for tool-mode generations
+    agent_entity_mode: str          # AGENT_ENTITY_MODE — personal_only | relevance_filtered | full
+    agent_history_char_budget: int  # AGENT_HISTORY_CHAR_BUDGET — max chars retained in loop history
+    agent_observation_max_chars: int # AGENT_OBSERVATION_MAX_CHARS — per-observation compression cap
 
     # Heartbeat — proactive background daemon (core/agent/heartbeat.py).
     # A daemon thread wakes every heartbeat_interval_seconds, scans EntityStore for
@@ -141,6 +145,23 @@ class Settings:
     # Same-day windows (e.g. dnd_start_hour=9, dnd_end_hour=17) also work naturally.
     dnd_start_hour: int             # DND_START_HOUR — 24h hour (0–23) when quiet period begins
     dnd_end_hour: int               # DND_END_HOUR   — 24h hour (0–23) when quiet period ends
+
+    # Web fetch TLS mode — controls SSL certificate verification in web_fetch.
+    # 'strict' (default): refuse connections with invalid/self-signed certificates.
+    # 'allow_insecure_fallback': retry with verify=False on SSL failure and annotate
+    # the result.  Use only when fetching trusted internal URLs with self-signed certs.
+    web_fetch_tls_mode: str         # WEB_FETCH_TLS_MODE — 'strict' or 'allow_insecure_fallback'
+    # CSV allowlist of domains where insecure TLS fallback is permitted.
+    # Empty by default; must be explicitly set by the user.
+    web_fetch_insecure_fallback_domains: tuple[str, ...]
+    # If True, httpx retries SSL failures once using certifi's CA bundle before
+    # considering insecure fallback.
+    web_fetch_tls_retry_with_certifi: bool
+
+    # Calendar connector runtime tuning.
+    calendar_read_timeout_seconds: int
+    calendar_read_retry_count: int
+    calendar_read_retry_delay_seconds: float
 
 
 @lru_cache(maxsize=1)
@@ -189,8 +210,21 @@ def get() -> Settings:
         extraction_enabled=_env_bool("EXTRACTION_ENABLED", True),
         agent_enabled=_env_bool("AGENT_ENABLED", True),
         agent_max_steps=_env_int("AGENT_MAX_STEPS", 8),
+        agent_temperature=_env_float("AGENT_TEMPERATURE", 0.0),
+        agent_entity_mode=_env_str("AGENT_ENTITY_MODE", "relevance_filtered"),
+        agent_history_char_budget=max(1000, _env_int("AGENT_HISTORY_CHAR_BUDGET", 8000)),
+        agent_observation_max_chars=max(500, _env_int("AGENT_OBSERVATION_MAX_CHARS", 1800)),
         heartbeat_enabled=_env_bool("HEARTBEAT_ENABLED", True),
         heartbeat_interval_seconds=_env_int("HEARTBEAT_INTERVAL_SECONDS", 300),
         dnd_start_hour=_env_int("DND_START_HOUR", 23),
         dnd_end_hour=_env_int("DND_END_HOUR", 7),
+        web_fetch_tls_mode=_env_str("WEB_FETCH_TLS_MODE", "strict"),
+        web_fetch_insecure_fallback_domains=_env_csv(
+            "WEB_FETCH_INSECURE_FALLBACK_DOMAINS",
+            (),
+        ),
+        web_fetch_tls_retry_with_certifi=_env_bool("WEB_FETCH_TLS_RETRY_WITH_CERTIFI", True),
+        calendar_read_timeout_seconds=max(1, _env_int("CALENDAR_READ_TIMEOUT_SECONDS", 10)),
+        calendar_read_retry_count=max(0, _env_int("CALENDAR_READ_RETRY_COUNT", 1)),
+        calendar_read_retry_delay_seconds=max(0.0, _env_float("CALENDAR_READ_RETRY_DELAY_SECONDS", 0.4)),
     )

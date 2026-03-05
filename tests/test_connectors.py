@@ -4,6 +4,7 @@ All external side-effects are patched:
     subprocess.run        → mocked for NotifyTool / osascript calls
     core.speaker.speak    → mocked for SpeakTool
     connectors.web_search._DDGS → mocked for WebSearchTool
+    connectors.web_fetch._ScraplingFetcher / _HTTPX → mocked for WebFetchTool
     _run_osascript        → mocked for ReminderAddTool / CalendarReadTool
 
 Real I/O is only used by ShellTool (allowlisted commands like date/pwd/echo)
@@ -15,9 +16,11 @@ Test classes:
     TestSpeakTool          — TTS via core.speaker.speak()
     TestShellTool          — allowlist + metachar security layers (real subprocess)
     TestWebSearchTool      — DuckDuckGo search with mocked _DDGS
+    TestWebFetchTool       — Scrapling-first fetch with mocked fallback paths
     TestMemoryOpTools      — mark_task_done, update_fact, list_open_tasks
     TestReminderAddTool    — AppleScript safety: quote escaping + date handling
 """
+import json
 import subprocess
 import tempfile
 import unittest
@@ -28,7 +31,17 @@ from connectors.memory_ops import ListOpenTasksTool, MarkTaskDoneTool, UpdateFac
 from connectors.notify import NotifyTool, SpeakTool, _escape_as
 from connectors.shell import ShellTool
 from connectors.web_search import WebSearchTool
-from connectors.apple_calendar import ReminderAddTool, CalendarReadTool, _escape_as as _cal_escape_as
+from connectors.web_fetch import (
+    WebFetchTool,
+    _try_parse_json,
+    _is_json_content_type,
+    _is_ssl_error,
+    _is_domain_allowlisted,
+)
+from connectors.apple_calendar import (
+    ReminderAddTool, CalendarReadTool, _escape_as as _cal_escape_as,
+    _parse_due_datetime, _due_date_applescript,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -218,23 +231,29 @@ class TestWebSearchTool(unittest.TestCase):
 
     @patch("connectors.web_search._DDGS")
     def test_returns_results(self, mock_ddgs_cls: MagicMock) -> None:
-        """Search results are formatted as '- title: body' lines in the content."""
+        """Search results are returned as compact structured JSON."""
         mock_ddgs_cls.return_value.text.return_value = [
-            {"title": "Python 3.13", "body": "Released in October 2024."},
+            {"title": "Python 3.13", "body": "Released in October 2024.", "href": "https://python.org"},
             {"title": "Release notes", "body": "Various improvements."},
         ]
         result = self.tool.execute(query="Python 3.13 release")
         self.assertFalse(result.is_error)
-        self.assertIn("Python 3.13", result.content)
-        self.assertIn("Released in October", result.content)
+        payload = json.loads(result.content)
+        self.assertEqual(payload["query"], "Python 3.13 release")
+        self.assertEqual(len(payload["results"]), 1)
+        self.assertEqual(payload["results"][0]["url"], "https://python.org")
+        self.assertIn("Python 3.13", payload["results"][0]["title"])
+        mock_ddgs_cls.return_value.text.assert_called_once_with("Python 3.13 release", max_results=5)
 
     @patch("connectors.web_search._DDGS")
     def test_no_results(self, mock_ddgs_cls: MagicMock) -> None:
-        """An empty result list returns a 'No results' message (not an error)."""
+        """An empty result list returns an empty structured result payload."""
         mock_ddgs_cls.return_value.text.return_value = []
         result = self.tool.execute(query="xyzzy nothing here")
         self.assertFalse(result.is_error)
-        self.assertIn("No results", result.content)
+        payload = json.loads(result.content)
+        self.assertEqual(payload["query"], "xyzzy nothing here")
+        self.assertEqual(payload["results"], [])
 
     @patch("connectors.web_search._DDGS")
     def test_search_error(self, mock_ddgs_cls: MagicMock) -> None:
@@ -244,12 +263,120 @@ class TestWebSearchTool(unittest.TestCase):
         self.assertTrue(result.is_error)
         self.assertIn("Search failed", result.content)
 
+    @patch("connectors.web_search._DDGS")
+    def test_max_results_clamped(self, mock_ddgs_cls: MagicMock) -> None:
+        """max_results is clamped so huge values don't explode request cost."""
+        mock_ddgs_cls.return_value.text.return_value = []
+        self.tool.execute(query="anything", max_results=999)
+        mock_ddgs_cls.return_value.text.assert_called_once_with("anything", max_results=10)
+
+    @patch("connectors.web_search._DDGS")
+    def test_output_is_size_capped(self, mock_ddgs_cls: MagicMock) -> None:
+        long_snippet = "A" * 2000
+        mock_ddgs_cls.return_value.text.return_value = [
+            {"title": f"Result {idx}", "body": long_snippet, "href": f"https://example.com/{idx}"}
+            for idx in range(1, 12)
+        ]
+        result = self.tool.execute(query="long query", max_results=10)
+        self.assertFalse(result.is_error)
+        self.assertLessEqual(len(result.content), 2500)
+
     @patch("connectors.web_search._DDGS", None)
     def test_missing_ddgs_import(self) -> None:
         """When duckduckgo-search is not installed, _DDGS is None → error with install hint."""
         result = self.tool.execute(query="test")
         self.assertTrue(result.is_error)
-        self.assertIn("duckduckgo-search", result.content)
+        self.assertIn("ddgs", result.content.lower())
+
+
+# ---------------------------------------------------------------------------
+# WebFetchTool (Scrapling-first with fallback)
+# ---------------------------------------------------------------------------
+
+class TestWebFetchTool(unittest.TestCase):
+    """Verify WebFetchTool uses Scrapling first and falls back safely."""
+
+    def setUp(self) -> None:
+        self.tool = WebFetchTool()
+
+    @patch("connectors.web_fetch._ScraplingFetcher")
+    def test_scrapling_success(self, mock_fetcher: MagicMock) -> None:
+        """Readable text is returned when Scrapling succeeds."""
+        fake_response = MagicMock()
+        fake_response.body = b"<html><body><h1>Hello</h1><p>world</p></body></html>"
+        mock_fetcher.get.return_value = fake_response
+
+        result = self.tool.execute(url="https://example.com")
+        self.assertFalse(result.is_error)
+        self.assertIn("URL: https://example.com", result.content)
+        self.assertIn("Hello", result.content)
+        self.assertIn("world", result.content)
+        mock_fetcher.get.assert_called_once()
+
+    @patch("connectors.web_fetch._ScraplingFetcher")
+    def test_scrapling_status_blocked_returns_error(self, mock_fetcher: MagicMock) -> None:
+        fake_response = MagicMock()
+        fake_response.status_code = 403
+        fake_response.url = "https://example.com/challenge"
+        fake_response.body = b"<html><body>Forbidden</body></html>"
+        mock_fetcher.get.return_value = fake_response
+
+        result = self.tool.execute(url="https://example.com")
+        self.assertTrue(result.is_error)
+        self.assertIn("anti-bot", result.content.lower())
+        self.assertIn("403", result.content)
+
+    @patch("connectors.web_fetch._ScraplingFetcher")
+    def test_scrapling_js_challenge_returns_error(self, mock_fetcher: MagicMock) -> None:
+        fake_response = MagicMock()
+        fake_response.url = "https://example.com/challenge"
+        fake_response.body = b"<html><body>Please enable JavaScript to continue.</body></html>"
+        mock_fetcher.get.return_value = fake_response
+
+        result = self.tool.execute(url="https://example.com")
+        self.assertTrue(result.is_error)
+        self.assertIn("anti-bot", result.content.lower())
+
+    @patch("connectors.web_fetch._ScraplingFetcher")
+    def test_unsupported_region_url_returns_error(self, mock_fetcher: MagicMock) -> None:
+        fake_response = MagicMock()
+        fake_response.url = "https://eu.usatoday.com/unsupported-eu/"
+        fake_response.body = b"<html><body>Some generic content</body></html>"
+        mock_fetcher.get.return_value = fake_response
+
+        result = self.tool.execute(url="https://eu.usatoday.com/unsupported-eu/")
+        self.assertTrue(result.is_error)
+        self.assertIn("blocked", result.content.lower())
+
+    @patch("connectors.web_fetch._HTTPX")
+    @patch("connectors.web_fetch._ScraplingFetcher")
+    def test_fallback_to_httpx(self, mock_fetcher: MagicMock, mock_httpx: MagicMock) -> None:
+        """When Scrapling fails, HTTP fallback still returns content."""
+        mock_fetcher.get.side_effect = RuntimeError("blocked")
+        http_response = MagicMock()
+        http_response.text = "<html><body><p>Fallback content</p></body></html>"
+        http_response.url = "https://example.com/final"
+        http_response.raise_for_status.return_value = None
+        mock_httpx.get.return_value = http_response
+
+        result = self.tool.execute(url="https://example.com")
+        self.assertFalse(result.is_error)
+        self.assertIn("Fallback content", result.content)
+        self.assertIn("https://example.com/final", result.content)
+
+    def test_invalid_url(self) -> None:
+        """Invalid URLs are rejected early with a clear error."""
+        result = self.tool.execute(url="not-a-url")
+        self.assertTrue(result.is_error)
+        self.assertIn("Invalid URL", result.content)
+
+    @patch("connectors.web_fetch._HTTPX", None)
+    @patch("connectors.web_fetch._ScraplingFetcher", None)
+    def test_missing_fetchers(self) -> None:
+        """Missing Scrapling and HTTP fallback returns install guidance."""
+        result = self.tool.execute(url="https://example.com")
+        self.assertTrue(result.is_error)
+        self.assertIn("scrapling[fetchers]", result.content)
 
 
 # ---------------------------------------------------------------------------
@@ -361,13 +488,17 @@ class TestReminderAddTool(unittest.TestCase):
 
     @patch("connectors.apple_calendar._run_osascript")
     def test_due_date_valid(self, mock_run: MagicMock) -> None:
-        """A valid ISO date is converted to 'Month DD, YYYY' format in the AppleScript."""
+        """A valid ISO date triggers AppleScript component setters and result includes timestamp."""
         mock_run.return_value = ("", False)
         result = self.tool.execute(title="Task", due_date="2026-03-15")
         self.assertFalse(result.is_error)
-        self.assertIn("due 2026-03-15", result.content)
+        # Result must include a normalized timestamp (date-only defaults to 09:00)
+        self.assertIn("2026-03-15T09:00", result.content)
         script = mock_run.call_args[0][0]
-        self.assertIn("March 15, 2026", script)
+        # Component setters used (not locale-dependent date string)
+        self.assertIn("set year of d to 2026", script)
+        self.assertIn("set month of d to 3", script)
+        self.assertIn("set day of d to 15", script)
 
     @patch("connectors.apple_calendar._run_osascript")
     def test_due_date_invalid_silently_skipped(self, mock_run: MagicMock) -> None:
@@ -385,6 +516,345 @@ class TestReminderAddTool(unittest.TestCase):
         mock_run.return_value = ("Permission denied", True)
         result = self.tool.execute(title="Task")
         self.assertTrue(result.is_error)
+
+
+# ---------------------------------------------------------------------------
+# CalendarReadTool (retry-on-timeout behavior)
+# ---------------------------------------------------------------------------
+
+class TestCalendarReadTool(unittest.TestCase):
+    """Verify CalendarReadTool retries timeout failures once and reports cleanly."""
+
+    def setUp(self) -> None:
+        self.tool = CalendarReadTool()
+
+    @patch("connectors.apple_calendar._run_osascript")
+    @patch("connectors.apple_calendar._config")
+    def test_success_first_attempt(self, mock_cfg: MagicMock, mock_run: MagicMock) -> None:
+        mock_cfg.get.return_value = MagicMock(
+            calendar_read_timeout_seconds=7,
+            calendar_read_retry_count=1,
+            calendar_read_retry_delay_seconds=0.0,
+        )
+        mock_run.return_value = ("Standup at Thursday 10:00", False)
+
+        result = self.tool.execute(days=2)
+        self.assertFalse(result.is_error)
+        self.assertIn("Standup", result.content)
+        self.assertEqual(mock_run.call_count, 1)
+        self.assertEqual(mock_run.call_args.kwargs.get("timeout"), 7)
+
+    @patch("connectors.apple_calendar._run_osascript")
+    @patch("connectors.apple_calendar._config")
+    def test_timeout_then_success_retries_once(
+        self, mock_cfg: MagicMock, mock_run: MagicMock
+    ) -> None:
+        mock_cfg.get.return_value = MagicMock(
+            calendar_read_timeout_seconds=10,
+            calendar_read_retry_count=1,
+            calendar_read_retry_delay_seconds=0.0,
+        )
+        mock_run.side_effect = [
+            ("osascript timed out.", True),
+            ("Planning review at Friday 09:00", False),
+        ]
+
+        result = self.tool.execute(days=3)
+        self.assertFalse(result.is_error)
+        self.assertIn("Planning review", result.content)
+        self.assertEqual(mock_run.call_count, 2)
+
+    @patch("connectors.apple_calendar._run_osascript")
+    @patch("connectors.apple_calendar._config")
+    def test_timeout_retries_exhausted_returns_deterministic_error(
+        self, mock_cfg: MagicMock, mock_run: MagicMock
+    ) -> None:
+        mock_cfg.get.return_value = MagicMock(
+            calendar_read_timeout_seconds=10,
+            calendar_read_retry_count=1,
+            calendar_read_retry_delay_seconds=0.0,
+        )
+        mock_run.side_effect = [
+            ("osascript timed out.", True),
+            ("osascript timed out.", True),
+        ]
+
+        result = self.tool.execute(days=1)
+        self.assertTrue(result.is_error)
+        self.assertIn("timed out after 2 attempts", result.content.lower())
+        self.assertEqual(mock_run.call_count, 2)
+
+    @patch("connectors.apple_calendar._run_osascript")
+    @patch("connectors.apple_calendar._config")
+    def test_non_timeout_error_does_not_retry(
+        self, mock_cfg: MagicMock, mock_run: MagicMock
+    ) -> None:
+        mock_cfg.get.return_value = MagicMock(
+            calendar_read_timeout_seconds=10,
+            calendar_read_retry_count=3,
+            calendar_read_retry_delay_seconds=0.0,
+        )
+        mock_run.return_value = ("Permission denied", True)
+
+        result = self.tool.execute(days=1)
+        self.assertTrue(result.is_error)
+        self.assertIn("Permission denied", result.content)
+        self.assertEqual(mock_run.call_count, 1)
+
+
+# ---------------------------------------------------------------------------
+# Reminder datetime parsing (_parse_due_datetime, _due_date_applescript)
+# ---------------------------------------------------------------------------
+
+class TestReminderDatetimeParsing(unittest.TestCase):
+    """Verify the due date/time parsing helpers handle all supported ISO formats."""
+
+    def test_date_only_defaults_to_0900(self) -> None:
+        """YYYY-MM-DD is parsed and time defaults to 09:00:00."""
+        dt = _parse_due_datetime("2026-03-15")
+        self.assertIsNotNone(dt)
+        assert dt is not None
+        self.assertEqual(dt.year, 2026)
+        self.assertEqual(dt.month, 3)
+        self.assertEqual(dt.day, 15)
+        self.assertEqual(dt.hour, 9)
+        self.assertEqual(dt.minute, 0)
+        self.assertEqual(dt.second, 0)
+
+    def test_datetime_hhmm_parsed(self) -> None:
+        """YYYY-MM-DDTHH:MM is parsed with seconds defaulting to 0."""
+        dt = _parse_due_datetime("2026-03-15T14:30")
+        self.assertIsNotNone(dt)
+        assert dt is not None
+        self.assertEqual(dt.hour, 14)
+        self.assertEqual(dt.minute, 30)
+        self.assertEqual(dt.second, 0)
+
+    def test_datetime_full_parsed(self) -> None:
+        """YYYY-MM-DDTHH:MM:SS is parsed in full."""
+        dt = _parse_due_datetime("2026-03-15T14:30:45")
+        self.assertIsNotNone(dt)
+        assert dt is not None
+        self.assertEqual(dt.second, 45)
+
+    def test_invalid_string_returns_none(self) -> None:
+        """Unparseable strings return None without raising."""
+        self.assertIsNone(_parse_due_datetime("not-a-date"))
+        self.assertIsNone(_parse_due_datetime("tomorrow"))
+        self.assertIsNone(_parse_due_datetime(""))
+
+    def test_applescript_uses_component_setters(self) -> None:
+        """_due_date_applescript uses year/month/day/time setters, not date string literals."""
+        from datetime import datetime
+        dt = datetime(2026, 3, 15, 9, 0, 0)
+        snippet = _due_date_applescript(dt)
+        self.assertIn("set year of d to 2026", snippet)
+        self.assertIn("set month of d to 3", snippet)
+        self.assertIn("set day of d to 15", snippet)
+        self.assertIn("set time of d to 32400", snippet)  # 9*3600
+        self.assertIn("set due date of newReminder to d", snippet)
+        # Must NOT use locale-dependent date string literal
+        self.assertNotIn('date "', snippet)
+
+    @patch("connectors.apple_calendar._run_osascript")
+    def test_datetime_result_contains_normalized_timestamp(self, mock_run: MagicMock) -> None:
+        """Result message contains the normalized ISO timestamp when due_date is valid."""
+        mock_run.return_value = ("", False)
+        result = self.tool.execute(title="Meeting", due_date="2026-03-15T14:30")
+        self.assertFalse(result.is_error)
+        self.assertIn("2026-03-15T14:30", result.content)
+
+    @patch("connectors.apple_calendar._run_osascript")
+    def test_date_only_in_result_uses_0900(self, mock_run: MagicMock) -> None:
+        """Date-only input appears in result as YYYY-MM-DDTHH:MM with 09:00."""
+        mock_run.return_value = ("", False)
+        result = self.tool.execute(title="Task", due_date="2026-04-01")
+        self.assertIn("2026-04-01T09:00", result.content)
+
+    def setUp(self) -> None:
+        self.tool = ReminderAddTool()
+
+
+# ---------------------------------------------------------------------------
+# WebFetchTool — JSON detection helpers
+# ---------------------------------------------------------------------------
+
+class TestWebFetchJsonDetection(unittest.TestCase):
+    """Verify the JSON detection helpers used by WebFetchTool."""
+
+    def test_json_object_parsed(self) -> None:
+        """A valid JSON object body returns pretty-printed JSON."""
+        raw = '{"price": 50000, "currency": "USD"}'
+        parsed = _try_parse_json(raw)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertIn('"price"', parsed)
+
+    def test_json_array_parsed(self) -> None:
+        """A JSON array body is detected and returned."""
+        raw = '[{"id": 1}, {"id": 2}]'
+        parsed = _try_parse_json(raw)
+        self.assertIsNotNone(parsed)
+
+    def test_html_not_detected_as_json(self) -> None:
+        """HTML content is not mistaken for JSON."""
+        self.assertIsNone(_try_parse_json("<html><body>Hello</body></html>"))
+
+    def test_plain_text_not_detected_as_json(self) -> None:
+        """Plain text is not mistaken for JSON."""
+        self.assertIsNone(_try_parse_json("Just some text."))
+
+    def test_broken_json_returns_none(self) -> None:
+        """A body starting with '{' but invalid JSON returns None without raising."""
+        self.assertIsNone(_try_parse_json('{"broken": '))
+
+    def test_json_content_type_detected(self) -> None:
+        """application/json content-type header triggers JSON detection."""
+        headers = {"content-type": "application/json; charset=utf-8"}
+        self.assertTrue(_is_json_content_type(headers))
+
+    def test_html_content_type_not_json(self) -> None:
+        """text/html content-type is not detected as JSON."""
+        headers = {"content-type": "text/html"}
+        self.assertFalse(_is_json_content_type(headers))
+
+    @patch("connectors.web_fetch._ScraplingFetcher", None)
+    @patch("connectors.web_fetch._HTTPX")
+    def test_json_content_type_response_returns_json(self, mock_httpx: MagicMock) -> None:
+        """When server responds with application/json, raw JSON is returned."""
+        http_response = MagicMock()
+        http_response.headers = {"content-type": "application/json"}
+        http_response.text = '{"price": 50000}'
+        http_response.url = "https://api.example.com/price"
+        http_response.raise_for_status.return_value = None
+        mock_httpx.get.return_value = http_response
+
+        tool = WebFetchTool()
+        result = tool.execute(url="https://api.example.com/price")
+        self.assertFalse(result.is_error)
+        self.assertIn('"price"', result.content)
+
+
+# ---------------------------------------------------------------------------
+# WebFetchTool — TLS fallback toggle
+# ---------------------------------------------------------------------------
+
+class TestWebFetchTLSFallback(unittest.TestCase):
+    """Verify TLS fallback behaviour controlled by WEB_FETCH_TLS_MODE config."""
+
+    @patch("connectors.web_fetch._ScraplingFetcher", None)
+    @patch("connectors.web_fetch._HTTPX")
+    @patch("connectors.web_fetch._config")
+    def test_ssl_error_retried_when_mode_allow(
+        self, mock_cfg: MagicMock, mock_httpx: MagicMock
+    ) -> None:
+        """SSL failure triggers insecure retry when TLS mode is allow_insecure_fallback."""
+        mock_cfg.get.return_value.web_fetch_tls_mode = "allow_insecure_fallback"
+        mock_cfg.get.return_value.web_fetch_insecure_fallback_domains = (
+            "self-signed.example.com",
+        )
+        mock_cfg.get.return_value.web_fetch_tls_retry_with_certifi = False
+
+        ssl_exc = Exception("ssl certificate verify failed")
+        success_response = MagicMock()
+        success_response.headers = {"content-type": "text/html"}
+        success_response.text = "<html><body><p>Insecure page</p></body></html>"
+        success_response.url = "https://self-signed.example.com"
+        success_response.raise_for_status.return_value = None
+
+        # First call raises SSL error; second (verify=False) succeeds
+        mock_httpx.get.side_effect = [ssl_exc, success_response]
+
+        tool = WebFetchTool()
+        result = tool.execute(url="https://self-signed.example.com")
+        self.assertFalse(result.is_error)
+        self.assertIn("TLS verification disabled", result.content)
+        self.assertEqual(mock_httpx.get.call_count, 2)
+        # Second call must have verify=False
+        _, second_kwargs = mock_httpx.get.call_args_list[1]
+        self.assertFalse(second_kwargs.get("verify", True))
+
+    @patch("connectors.web_fetch._ScraplingFetcher", None)
+    @patch("connectors.web_fetch._HTTPX")
+    @patch("connectors.web_fetch._CERTIFI")
+    @patch("connectors.web_fetch._config")
+    def test_ssl_error_retried_with_certifi_in_strict_mode(
+        self,
+        mock_cfg: MagicMock,
+        mock_certifi: MagicMock,
+        mock_httpx: MagicMock,
+    ) -> None:
+        mock_cfg.get.return_value.web_fetch_tls_mode = "strict"
+        mock_cfg.get.return_value.web_fetch_insecure_fallback_domains = ()
+        mock_cfg.get.return_value.web_fetch_tls_retry_with_certifi = True
+        mock_certifi.where.return_value = "/tmp/certifi.pem"
+
+        ssl_exc = Exception("ssl certificate verify failed")
+        success_response = MagicMock()
+        success_response.headers = {"content-type": "text/html"}
+        success_response.text = "<html><body><p>Secure retry page</p></body></html>"
+        success_response.url = "https://secure.example.com"
+        success_response.raise_for_status.return_value = None
+        mock_httpx.get.side_effect = [ssl_exc, success_response]
+
+        tool = WebFetchTool()
+        result = tool.execute(url="https://secure.example.com")
+        self.assertFalse(result.is_error)
+        self.assertIn("CA bundle: certifi", result.content)
+        self.assertEqual(mock_httpx.get.call_count, 2)
+        _, second_kwargs = mock_httpx.get.call_args_list[1]
+        self.assertEqual(second_kwargs.get("verify"), "/tmp/certifi.pem")
+
+    @patch("connectors.web_fetch._ScraplingFetcher", None)
+    @patch("connectors.web_fetch._HTTPX")
+    @patch("connectors.web_fetch._config")
+    def test_ssl_error_allow_mode_not_allowlisted_blocks_insecure_fallback(
+        self, mock_cfg: MagicMock, mock_httpx: MagicMock
+    ) -> None:
+        mock_cfg.get.return_value.web_fetch_tls_mode = "allow_insecure_fallback"
+        mock_cfg.get.return_value.web_fetch_insecure_fallback_domains = ()
+        mock_cfg.get.return_value.web_fetch_tls_retry_with_certifi = False
+        mock_httpx.get.side_effect = Exception("ssl certificate verify failed")
+
+        tool = WebFetchTool()
+        result = tool.execute(url="https://not-allowlisted.example.com")
+        self.assertTrue(result.is_error)
+        self.assertEqual(mock_httpx.get.call_count, 1)
+        self.assertIn("WEB_FETCH_INSECURE_FALLBACK_DOMAINS", result.content)
+
+    @patch("connectors.web_fetch._ScraplingFetcher", None)
+    @patch("connectors.web_fetch._HTTPX")
+    @patch("connectors.web_fetch._config")
+    def test_ssl_error_not_retried_in_strict_mode(
+        self, mock_cfg: MagicMock, mock_httpx: MagicMock
+    ) -> None:
+        """SSL failure is not retried (only one attempt) when TLS mode is strict."""
+        mock_cfg.get.return_value.web_fetch_tls_mode = "strict"
+        mock_cfg.get.return_value.web_fetch_insecure_fallback_domains = ()
+        mock_cfg.get.return_value.web_fetch_tls_retry_with_certifi = False
+
+        ssl_exc = Exception("ssl certificate verify failed")
+        mock_httpx.get.side_effect = ssl_exc
+
+        tool = WebFetchTool()
+        result = tool.execute(url="https://self-signed.example.com")
+        self.assertTrue(result.is_error)
+        self.assertEqual(mock_httpx.get.call_count, 1)
+
+    def test_ssl_error_helper_detects_ssl_messages(self) -> None:
+        """_is_ssl_error returns True for SSL-related exception messages."""
+        self.assertTrue(_is_ssl_error(Exception("ssl certificate verify failed")))
+        self.assertTrue(_is_ssl_error(Exception("TLS handshake error")))
+        self.assertTrue(_is_ssl_error(Exception("certificate has expired")))
+        self.assertFalse(_is_ssl_error(Exception("connection refused")))
+        self.assertFalse(_is_ssl_error(Exception("timeout after 12s")))
+
+    def test_domain_allowlist_supports_subdomains(self) -> None:
+        self.assertTrue(
+            _is_domain_allowlisted("https://docs.example.com/page", ("example.com",))
+        )
+        self.assertTrue(_is_domain_allowlisted("https://example.com", ("example.com",)))
+        self.assertFalse(_is_domain_allowlisted("https://evil-example.com", ("example.com",)))
 
 
 if __name__ == "__main__":
