@@ -73,17 +73,23 @@ Notes:
 
 | Variable          | Default                             | Description                                      |
 | ----------------- | ----------------------------------- | ------------------------------------------------ |
-| `LLM_BACKEND`     | `mlx_vlm`                           | `mlx_vlm` or `mlx`                               |
+| `LLM_BACKEND`     | `mlx_vlm`                           | `mlx_vlm` (VLM checkpoints) or `mlx` (text-only checkpoints) |
 | `MLX_MODEL`       | `mlx-community/Qwen3.5-9B-MLX-4bit` | Active model (swap this value to change models)  |
 | `MLX_DRAFT_MODEL` | ``                                  | Optional speculative draft model (`mlx` backend) |
-| `MLX_MAX_TOKENS`  | `250`                               | Generation cap                                   |
-| `TEMPERATURE`     | `0.3`                               | Sampling temperature for non-agent conversational responses |
+| `MLX_MAX_TOKENS`  | `160`                               | Generation cap                                   |
+| `TEMPERATURE`     | `0.0`                               | Sampling temperature for conversational responses |
 
 Model profiles:
 
 - `mlx-community/Qwen3.5-9B-MLX-4bit` + `LLM_BACKEND=mlx_vlm`
 - `mlx-community/Qwen3.5-4B-MLX-4bit` + `LLM_BACKEND=mlx_vlm`
 - `mlx-community/Qwen2.5-14B-Instruct-MLX-4bit` + `LLM_BACKEND=mlx`
+
+Important:
+
+- `mlx-community/Qwen3.5-9B-MLX-4bit` is a VLM checkpoint (includes `vision_tower` weights), so it must run with `LLM_BACKEND=mlx_vlm`.
+- If you only need text and want lower latency, use a text-only checkpoint with `LLM_BACKEND=mlx`.
+- Defaults are tuned for low-latency M4 usage (lean context, deterministic sampling, optional heavy features off by default).
 
 ### Voice / Audio
 
@@ -137,9 +143,9 @@ Model profiles:
 | Variable                     | Default         | Description                                 |
 | ---------------------------- | --------------- | ------------------------------------------- |
 | `MEMORY_DIR`                 | `./data/memory` | SQLite location                             |
-| `RECENT_TURNS`               | `4`             | Recent turn buffer                          |
-| `SECOND_BRAIN_ENABLED`       | `true`          | Master switch for entity memory layer       |
-| `EXTRACTION_ENABLED`         | `true`          | Run entity extraction after each turn       |
+| `RECENT_TURNS`               | `0`             | Recent turn buffer                          |
+| `SECOND_BRAIN_ENABLED`       | `false`         | Master switch for entity memory layer       |
+| `EXTRACTION_ENABLED`         | `false`         | Run entity extraction after each turn       |
 | `ENTITY_RECALL_BUDGET`       | `400`           | Max characters of entity context in prompts |
 | `PROACTIVE_DEBOUNCE_SECONDS` | `60`            | Debounce for proactive suggestions          |
 
@@ -147,13 +153,13 @@ Model profiles:
 
 | Variable                     | Default | Description                                             |
 | ---------------------------- | ------- | ------------------------------------------------------- |
-| `AGENT_ENABLED`              | `true`  | Enable tool-using agent loop                            |
+| `AGENT_ENABLED`              | `false` | Enable tool-using agent loop                            |
 | `AGENT_MAX_STEPS`            | `8`     | Max ReAct iterations per request                        |
 | `AGENT_TEMPERATURE`          | `0.0`   | Sampling temperature for tool-mode generations          |
 | `AGENT_ENTITY_MODE`          | `relevance_filtered` | Entity recall mode: `personal_only`, `relevance_filtered`, `full` |
 | `AGENT_HISTORY_CHAR_BUDGET`  | `8000`  | Max combined chars retained in agent step history       |
 | `AGENT_OBSERVATION_MAX_CHARS`| `1800`  | Per-tool-observation compression cap                    |
-| `HEARTBEAT_ENABLED`          | `true`  | Start background proactive reminder daemon (voice mode) |
+| `HEARTBEAT_ENABLED`          | `false` | Start background proactive reminder daemon (voice mode) |
 | `HEARTBEAT_INTERVAL_SECONDS` | `300`   | Heartbeat tick interval                                 |
 | `DND_START_HOUR`             | `23`    | Do-not-disturb start hour (24h)                         |
 | `DND_END_HOUR`               | `7`     | Do-not-disturb end hour (24h)                           |
@@ -207,28 +213,34 @@ Run the test suite:
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Model upgrade benchmarking (performance + deep capability + real-world scenarios):
+Quick local performance benchmark:
 
 ```bash
-python3 benchmarks/run_model_upgrade_eval.py
+python3 main.py --bench
 ```
 
-Single-model performance-only benchmark:
+Deep capability benchmark (offline eval harness):
 
 ```bash
-python3 benchmarks/model_perf_benchmark.py \
-  --model mlx-community/Qwen3.5-9B-MLX-4bit \
-  --backend mlx_vlm \
-  --output-dir benchmarks/reports
+python3 benchmarks/deep_capability_benchmark.py
 ```
 
-Current suite size (as of 2026-03-05): 220 tests.
+Current suite size (as of 2026-03-06): 238 tests.
+
+M4 performance notes and tuning guide:
+
+```text
+docs/PERFORMANCE_M4.md
+```
 
 Useful sanity checks:
 
 ```bash
 # Verify loaded flags
 python3 -c "import config; s=config.get(); print(s.agent_enabled, s.heartbeat_enabled, s.second_brain_enabled)"
+
+# Check architecture + low-power mode
+python3 -c "import platform; print(platform.machine())" && pmset -g | grep -i lowpowermode
 
 # Inspect entity table
 sqlite3 data/memory/kage_memory.db ".schema entities"

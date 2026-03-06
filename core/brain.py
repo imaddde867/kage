@@ -188,6 +188,7 @@ class BrainService:
             policy_note=policy_note,
             entity_context=entity_context,
             topic_hint=derive_topic_hint(recent_turns),
+            memory_recall_enabled=self.settings.recent_turns > 0,
         )
 
     def _wants_task_context(self, user_input: str) -> bool:
