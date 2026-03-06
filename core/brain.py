@@ -143,7 +143,7 @@ class BrainService:
         """Assemble a ToolRegistry from all available connectors.
 
         Core connectors (always registered — no extra dependencies):
-            web_search, notify, speak
+            web_search, notify
 
         Memory connectors (registered only when second_brain is enabled —
         they need a live EntityStore):
@@ -165,10 +165,9 @@ class BrainService:
 
         # --- Core connectors (always available) ---
         from connectors.web_search import WebSearchTool
-        from connectors.notify import NotifyTool, SpeakTool
+        from connectors.notify import NotifyTool
         registry.register(WebSearchTool())
         registry.register(NotifyTool())
-        registry.register(SpeakTool())
 
         # --- Memory connectors (requires second_brain EntityStore) ---
         if hasattr(self, "_entity_store"):
