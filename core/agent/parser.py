@@ -56,6 +56,7 @@ _ALT_ATTR_RE = re.compile(
 )
 _JSON_CALL_RE = re.compile(r"^\s*(\{.*\})\s*$", re.DOTALL)
 _ATTR_RE = re.compile(r'(\w+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|(\S+))')
+_JSON_ENVELOPE_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 def _normalize_tool_name(name: str) -> str:
@@ -124,6 +125,57 @@ def _parse_tool_body(body: str) -> tuple[str, dict]:
     return tool_name, inferred
 
 
+def _parse_json_envelope(raw: str) -> ParsedStep | None:
+    candidates: list[str] = []
+    stripped = raw.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        candidates.append(stripped)
+    match = _JSON_ENVELOPE_RE.search(raw)
+    if match:
+        candidate = match.group(0).strip()
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+
+        thought = payload.get("thought")
+        thought_text = str(thought).strip() if isinstance(thought, str) and thought.strip() else None
+        step_type = str(payload.get("type", "")).strip().lower()
+
+        if step_type in {"answer", "final_answer", "final"} or ("answer" in payload and "tool" not in payload):
+            answer = payload.get("answer") or payload.get("final_answer") or payload.get("content")
+            if isinstance(answer, str) and answer.strip():
+                return ParsedStep(thought=thought_text, tool_call=None, answer=answer.strip())
+
+        if step_type in {"tool", "action", "tool_call"} or "tool" in payload or "name" in payload:
+            name = payload.get("tool") or payload.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            args = payload.get("args") or payload.get("input") or payload.get("arguments") or {}
+            if isinstance(args, str):
+                try:
+                    decoded = json.loads(args)
+                    if isinstance(decoded, dict):
+                        args = decoded
+                except json.JSONDecodeError:
+                    args = _args_from_body(args, _normalize_tool_name(name))
+            if not isinstance(args, dict):
+                args = {}
+            return ParsedStep(
+                thought=thought_text,
+                tool_call=ToolCall(name=_normalize_tool_name(name), args=args),
+                answer=None,
+            )
+
+    return None
+
+
 @dataclass
 class ParsedStep:
     """The structured result of parsing one AgentLoop generation step.
@@ -163,6 +215,13 @@ def parse_step(raw: str) -> ParsedStep:
     # Always extract the optional <thought> block first for debug logging.
     thought_match = _THOUGHT_RE.search(raw)
     thought = thought_match.group(1).strip() if thought_match else None
+
+    # 0) Preferred structured contract (JSON envelope), with XML fallback.
+    json_step = _parse_json_envelope(raw)
+    if json_step is not None:
+        if json_step.thought is None and thought is not None:
+            return ParsedStep(thought=thought, tool_call=json_step.tool_call, answer=json_step.answer)
+        return json_step
 
     # 1) Canonical <answer>...</answer>
     answer_match = _ANSWER_RE.search(raw)

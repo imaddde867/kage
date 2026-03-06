@@ -47,6 +47,17 @@ class ToolResult:
     tool_name: str
     content: str
     is_error: bool = False
+    outcome: "ToolOutcome | None" = None
+
+
+@dataclass
+class ToolOutcome:
+    status: str
+    structured: dict[str, Any] | None
+    sources: list[str]
+    retryable: bool
+    latency_ms: float | None = None
+    side_effects: bool = False
 
 
 class Tool(ABC):

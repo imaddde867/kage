@@ -54,7 +54,7 @@ When `AGENT_ENABLED=true`, the agent can use these tools via `ToolRegistry`:
 
 - `web_search`: DuckDuckGo text search with source URLs (`duckduckgo-search`)
 - `web_fetch`: Scrapling-first URL fetch + readable extraction with safe fallback (`scrapling[fetchers]`, `httpx`, `trafilatura`)
-- `shell`: allowlisted local shell commands only
+- `shell`: read-only allowlisted local shell commands only
 - `notify`: macOS notification via `osascript`
 - `speak`: direct TTS output
 - `calendar_read`: read upcoming events from macOS Calendar (`osascript`)
@@ -64,7 +64,7 @@ When `AGENT_ENABLED=true`, the agent can use these tools via `ToolRegistry`:
 Notes:
 
 - Calendar/Reminders/notifications require macOS and AppleScript permissions.
-- `shell` is restricted to a small allowlist and blocks pipes/redirection/operators.
+- `shell` is read-only and blocks pipes/redirection/operators; mutating shell actions are exposed separately via `shell_mutation` and require explicit confirmation.
 - `web_fetch` prefers Scrapling fetchers and falls back to `httpx` if needed.
 
 ## Configuration (`.env`)
@@ -179,14 +179,15 @@ main.py
 
 BrainService request flow
 1) guardrails state update
-2) if AGENT_ENABLED and classifier says "tools needed":
-     AgentLoop (ReAct XML format) -> ToolRegistry -> connectors
+2) RequestOrchestrator plans strategy + context + capabilities
+3) if AGENT_ENABLED and planner selects tools:
+     AgentLoop (JSON-first step envelope with XML fallback) -> ToolRegistry -> connectors
    else:
      classic conversational path
      (intent route -> prompt build -> LLM stream)
-3) persist exchange to SQLite
-4) optional entity extraction (LLMEntityExtractor -> EntityStore)
-5) optional proactive suggestion
+4) persist exchange/evidence/traces to SQLite
+5) optional entity extraction (LLMEntityExtractor -> EntityStore)
+6) optional proactive suggestion
 
 Voice mode only
 - HeartbeatAgent daemon wakes every HEARTBEAT_INTERVAL_SECONDS
@@ -196,7 +197,12 @@ Voice mode only
 
 Key modules:
 
-- `core/brain.py`: orchestration and routing between classic vs agent path
+- `core/brain.py`: compatibility facade over `RequestOrchestrator`
+- `core/platform/orchestrator.py`: agent-core request orchestration
+- `core/platform/execution_planner.py`: unified strategy planner (direct/retrieval/tool/mixed)
+- `core/platform/context_planner.py`: context source and budget planning
+- `core/platform/capability_catalog.py`: capability metadata + health scoring
+- `core/platform/storage/*`: shared schema owner + conversation/knowledge/evidence/trace stores
 - `core/intent_signals.py`: modular weighted intent scoring used by routing/context decisions
 - `core/agent/loop.py`: multi-step tool loop
 - `core/agent/tool_registry.py`: connector dispatch

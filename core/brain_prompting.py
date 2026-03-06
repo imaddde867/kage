@@ -4,7 +4,7 @@ from collections import deque
 from datetime import datetime
 from typing import Any, Protocol
 
-_SYSTEM_PROMPT = """You are Kage (影), a personal AI assistant for {name}.
+_SYSTEM_PROMPT = """You are {assistant_name}, a personal AI assistant for {name}.
 
 Style:
 - Direct, honest, warm.
@@ -39,12 +39,17 @@ class MemoryLike(Protocol):
     def recent_turns(self, limit: int = 4) -> list[tuple[str, str]]: ...
 
 
-def build_system_prompt(user_name: str, *, text_mode: bool = False) -> str:
+def build_system_prompt(
+    user_name: str,
+    *,
+    assistant_name: str = "Kage",
+    text_mode: bool = False,
+) -> str:
     now = datetime.now().astimezone()
     offset = now.strftime("%z")
     tz_offset = f"{offset[:3]}:{offset[3:]}" if len(offset) == 5 else offset
     today = f"{now.strftime('%Y-%m-%d %H:%M %Z')} (UTC{tz_offset})"
-    prompt = _SYSTEM_PROMPT.format(name=user_name, date=today)
+    prompt = _SYSTEM_PROMPT.format(name=user_name, assistant_name=assistant_name, date=today)
     if text_mode:
         prompt += f"\n{_TEXT_MODE_ADDENDUM}"
     return prompt
@@ -90,6 +95,7 @@ def build_messages(
     *,
     user_input: str,
     user_name: str,
+    assistant_name: str = "Kage",
     text_mode: bool,
     memory: MemoryLike,
     recent_turns: list[tuple[str, str]],
@@ -98,7 +104,11 @@ def build_messages(
     topic_hint: str = "",
     memory_recall_enabled: bool = True,
 ) -> list[dict[str, str]]:
-    system = build_system_prompt(user_name, text_mode=text_mode)
+    system = build_system_prompt(
+        user_name,
+        assistant_name=assistant_name,
+        text_mode=text_mode,
+    )
     if policy_note:
         system += f"\n\nSession policy notes:\n{policy_note}"
 

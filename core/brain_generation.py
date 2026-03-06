@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -8,6 +9,7 @@ import config
 
 _BACKEND_MLX = "mlx"
 _BACKEND_MLX_VLM = "mlx_vlm"
+logger = logging.getLogger(__name__)
 
 
 def _is_vlm_checkpoint_mismatch(exc: Exception) -> bool:
@@ -46,7 +48,7 @@ class GenerationRuntime:
         from transformers.utils import logging as hf_logging
 
         model_path = get_model_path(self.settings.mlx_model)
-        print(f"  Loading {self.settings.mlx_model}…", flush=True)
+        logger.info("Loading model %s", self.settings.mlx_model)
         model = load_model(model_path)
 
         prev_hf_level = hf_logging.get_verbosity()
@@ -76,7 +78,7 @@ class GenerationRuntime:
         except Exception:
             make_sampler = None
 
-        print(f"  Loading {self.settings.mlx_model}…", flush=True)
+        logger.info("Loading model %s", self.settings.mlx_model)
         try:
             model, tokenizer = load(self.settings.mlx_model)
         except ValueError as exc:
@@ -93,17 +95,17 @@ class GenerationRuntime:
 
         self._mlx_draft_model = None
         if self.settings.mlx_draft_model:
-            print(f"  Loading draft model {self.settings.mlx_draft_model}…", flush=True)
+            logger.info("Loading draft model %s", self.settings.mlx_draft_model)
             draft_model, _ = load(self.settings.mlx_draft_model)
             self._mlx_draft_model = draft_model
 
         self.tokenizer = tokenizer
 
     def warmup(self, prompt: str, *, max_tokens: int = 5) -> None:
-        print("  Warming up (compiling MLX graphs)…", flush=True)
+        logger.info("Warming up runtime")
         for _ in self.stream_raw(prompt, max_tokens=max_tokens):
             pass
-        print("  Ready.\n", flush=True)
+        logger.info("Runtime ready")
 
     def _iter_mlx_stream(self, *, prompt: str, max_tokens: int, temperature: float) -> Iterator[Any]:
         """Yield chunks from mlx_lm stream_generate across API variants."""

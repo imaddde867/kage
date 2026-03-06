@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from core.brain_generation import GenerationRuntime
 
 from core.brain_prompting import apply_chat_template
-from core.second_brain.extractor import ExtractedEntity
+from core.second_brain.types import ExtractedEntity
 
 logger = logging.getLogger(__name__)
 

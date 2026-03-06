@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import subprocess
 
+from connectors.apple_bridge import escape_applescript
 from core.agent.tool_base import Tool, ToolResult
 
 
@@ -41,7 +42,7 @@ def _escape_as(text: str) -> str:
     Example:
         _escape_as('say "hi"')  →  'say \\\\"hi\\\\"'
     """
-    return text.replace("\\", "\\\\").replace('"', '\\"')
+    return escape_applescript(text)
 
 
 class NotifyTool(Tool):

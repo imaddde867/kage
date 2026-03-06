@@ -46,14 +46,14 @@ class ListenerService:
             return
 
         if self._stt_backend == "apple":
-            print("[Listener] STT: macOS native speech recognition")
+            logger.info("Listener STT backend: apple")
         else:
-            print("[Listener] Loading Whisper model...")
+            logger.info("Loading Whisper model")
             from faster_whisper import WhisperModel
             self._whisper = WhisperModel(self.settings.whisper_model, device="cpu", compute_type="int8")
-            print("[Listener] Whisper ready.")
+            logger.info("Whisper ready")
 
-        print("[Listener] Loading wake word model...")
+        logger.info("Loading wake word model")
         import openwakeword
         from openwakeword.model import Model as WakeWordModel
         openwakeword.utils.download_models([self.settings.wake_word_model])
@@ -62,7 +62,7 @@ class ListenerService:
             inference_framework="onnx",
         )
         self._models_loaded = True
-        print(f"[Listener] Ready. Say '{self.settings.wake_word.title()}' to activate.\n")
+        logger.info("Listener ready for wake word '%s'", self.settings.wake_word)
 
     def wait_for_wake_word(self) -> None:
         if not self._models_loaded:
@@ -75,11 +75,11 @@ class ListenerService:
                 scores = self._wake_model.predict(np.asarray(audio).flatten().astype(np.int16))
                 for name, score in scores.items():
                     if float(score) > self.settings.wake_word_threshold:
-                        print(f"[Wake] '{name}' detected ({float(score):.2f})")
+                        logger.info("Wake word '%s' detected (%.2f)", name, float(score))
                         return
 
     def record_until_silence(self) -> np.ndarray:
-        print("[Listener] Listening...")
+        logger.info("Listening for user speech")
         chunk = self.settings.record_chunk_size
         chunks: list[np.ndarray] = []
         silence = 0

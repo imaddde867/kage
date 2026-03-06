@@ -73,15 +73,13 @@ logger = logging.getLogger(__name__)
 _AGENT_SYSTEM_PROMPT = """\
 You are {assistant_name}, an autonomous AI agent for {user_name}. Today is {today}.
 
-Use tools step by step to complete tasks. For each step output exactly one of:
+Use tools step by step to complete tasks. For each step output exactly one JSON object:
 
 Tool call:
-<thought>Your reasoning</thought>
-<tool>tool_name</tool>
-<input>{{"arg": "value"}}</input>
+{{"type":"tool","thought":"short reasoning","tool":"tool_name","args":{{"arg":"value"}}}}
 
 Final answer:
-<answer>Your spoken response (no markdown)</answer>
+{{"type":"answer","answer":"Your spoken response (no markdown)"}}
 
 Available tools:
 {tool_schemas}
@@ -97,6 +95,7 @@ Rules:
 - When reporting web facts, always cite the source URL in your answer
 - Do not claim to have searched or fetched data unless a tool result supports it
 - If a tool fails, try an alternative or explain the limitation
+- XML fallback (<tool>/<input>/<answer>) is accepted for compatibility, but prefer JSON objects
 - Max {max_steps} steps
 
 {entity_context_block}"""
@@ -204,8 +203,8 @@ class AgentLoop:
     def _generate(self, prompt: str) -> str:
         """Accumulate the full model output for one step into a single string.
 
-        We buffer the entire output before calling parse_step() because the
-        XML tags (<tool>, <answer>, etc.) often span multiple streaming chunks.
+        We buffer the entire output before calling parse_step() because
+        JSON objects or XML fallback tags may span multiple streaming chunks.
         Parsing a partial buffer would give incorrect results.
 
         track_stats=False avoids overwriting brain.last_stats, which is used
@@ -366,7 +365,7 @@ class AgentLoop:
 
         system = (
             f"You are {self._settings.assistant_name}. Return the final user-facing answer now.\n"
-            "Do not call tools. Do not output <thought>, <tool>, or <input> tags.\n"
+            "Do not call tools. Output plain text only.\n"
             "Use only the user request and prior tool results in this conversation.\n"
             "If evidence is limited, state the limitation briefly and answer with best supported guidance."
         )
@@ -481,7 +480,7 @@ class AgentLoop:
                         history,
                         raw,
                         "format_guard",
-                        "Invalid final answer format. Return <answer> with user-facing content only.",
+                        "Invalid final answer format. Return a JSON answer object with user-facing content only.",
                     )
                     continue
                 answer = guard_answer_truthfulness(answer_text, tools_used)
@@ -552,7 +551,11 @@ class AgentLoop:
                 tools_used.add(result.tool_name)
                 if result.tool_name in {"web_search", "web_fetch"}:
                     web_attempts += 1
-                    urls = self._extract_urls(result.content)
+                    urls = []
+                    if result.outcome is not None and result.outcome.sources:
+                        urls = list(result.outcome.sources)
+                    if not urls:
+                        urls = self._extract_urls(result.content)
                     for url in urls:
                         if url not in checked_urls:
                             checked_urls.append(url)
@@ -579,7 +582,7 @@ class AgentLoop:
                         "format_guard",
                         (
                             "Malformed output. Next step must be either a valid tool call "
-                            "or <answer>...</answer> with no internal tags."
+                            "or a JSON answer object with no internal tags."
                         ),
                     )
                     continue

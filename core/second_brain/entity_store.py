@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import sqlite3
-import uuid
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+from core.platform.storage.knowledge_store import KnowledgeStore
 
 
 @dataclass
@@ -24,31 +23,10 @@ class Entity:
 class EntityStore:
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
-        self._init_schema()
-
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(str(self.db_path))
+        self._store = KnowledgeStore(self.db_path)
 
     def _init_schema(self) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS entities (
-                    id         TEXT PRIMARY KEY,
-                    kind       TEXT NOT NULL,
-                    key        TEXT NOT NULL,
-                    value      TEXT NOT NULL,
-                    status     TEXT DEFAULT 'active',
-                    due_date   TEXT,
-                    source_id  TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_kind ON entities(kind)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_status ON entities(status)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_key ON entities(kind, key)")
+        self._store = KnowledgeStore(self.db_path)
 
     def upsert(
         self,
@@ -60,63 +38,50 @@ class EntityStore:
         due_date: Optional[str] = None,
         source_id: Optional[str] = None,
     ) -> str:
-        now = datetime.now().isoformat()
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT id FROM entities WHERE kind=? AND key=?",
-                (kind, key),
-            ).fetchone()
-            if row:
-                entity_id = row[0]
-                conn.execute(
-                    "UPDATE entities SET value=?, status=?, due_date=?, source_id=?, updated_at=? WHERE id=?",
-                    (value, status, due_date, source_id, now, entity_id),
-                )
-                return entity_id
-            else:
-                entity_id = str(uuid.uuid4())
-                conn.execute(
-                    """
-                    INSERT INTO entities
-                        (id, kind, key, value, status, due_date, source_id, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (entity_id, kind, key, value, status, due_date, source_id, now, now),
-                )
-                return entity_id
+        return self._store.upsert(
+            kind,
+            key,
+            value,
+            status=status,
+            due_date=due_date,
+            source_id=source_id,
+        )
 
     def get_by_kind(self, kind: str, *, status: str = "active") -> list[Entity]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, kind, key, value, status, due_date, source_id, created_at, updated_at
-                FROM entities
-                WHERE kind=? AND status=?
-                ORDER BY updated_at DESC
-                """,
-                (kind, status),
-            ).fetchall()
-        return [Entity(*row) for row in rows]
+        rows = self._store.get_by_kind(kind, status=status)
+        return [
+            Entity(
+                id=row.id,
+                kind=row.kind,
+                key=row.key,
+                value=row.value,
+                status=row.status,
+                due_date=row.due_date,
+                source_id=row.source_id,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+            )
+            for row in rows
+        ]
 
     def get_by_key(self, kind: str, key: str) -> Optional[Entity]:
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT id, kind, key, value, status, due_date, source_id, created_at, updated_at
-                FROM entities
-                WHERE kind=? AND key=?
-                """,
-                (kind, key),
-            ).fetchone()
-        return Entity(*row) if row else None
+        entity = self._store.get_by_key(kind, key)
+        if entity is None:
+            return None
+        return Entity(
+            id=entity.id,
+            kind=entity.kind,
+            key=entity.key,
+            value=entity.value,
+            status=entity.status,
+            due_date=entity.due_date,
+            source_id=entity.source_id,
+            created_at=entity.created_at,
+            updated_at=entity.updated_at,
+        )
 
     def mark_done(self, entity_id: str) -> None:
-        now = datetime.now().isoformat()
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE entities SET status='done', updated_at=? WHERE id=?",
-                (now, entity_id),
-            )
+        self._store.mark_done(entity_id)
 
     def recall_personal_context(self, *, char_budget: int = 150) -> str:
         """Profile + preferences only — always safe to inject regardless of intent."""

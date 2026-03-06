@@ -27,11 +27,14 @@ only the integer `days` parameter is interpolated, cast to int() first.
 """
 from __future__ import annotations
 
-import subprocess
 import time
 from datetime import date, datetime
 
 import config as _config
+from connectors.apple_bridge import (
+    escape_applescript,
+    run_osascript,
+)
 from core.agent.tool_base import Tool, ToolResult
 
 
@@ -48,7 +51,7 @@ def _escape_as(text: str) -> str:
     Returns:
         Escaped string safe to place between AppleScript double quotes.
     """
-    return text.replace("\\", "\\\\").replace('"', '\\"')
+    return escape_applescript(text)
 
 
 def _run_osascript(script: str, timeout: int = 10) -> tuple[str, bool]:
@@ -63,21 +66,7 @@ def _run_osascript(script: str, timeout: int = 10) -> tuple[str, bool]:
         On success: (stdout.strip(), False).
         On failure: (error_message, True).
     """
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        if result.returncode != 0:
-            # osascript writes error messages to stderr
-            return result.stderr.strip() or "osascript returned non-zero exit code.", True
-        return result.stdout.strip(), False
-    except FileNotFoundError:
-        return "osascript is not available (non-macOS system).", True
-    except subprocess.TimeoutExpired:
-        return "osascript timed out.", True
+    return run_osascript(script, timeout=timeout)
 
 
 def _run_osascript_with_retry(

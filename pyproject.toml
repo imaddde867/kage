@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kage"
+version = "0.1.0"
+description = "Kage local agent platform"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools]
+packages = [
+  "core",
+  "core.agent",
+  "core.second_brain",
+  "core.platform",
+  "core.platform.storage",
+  "connectors",
+]
