@@ -7,6 +7,7 @@ Text: input() → LLM → print (optional Kokoro TTS)
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import logging
 import threading
 import time
@@ -288,8 +289,20 @@ def run_bench(settings: config.Settings) -> None:
     if settings.llm_backend == "mlx" and settings.mlx_draft_model:
         print(f"  Draft      : {settings.mlx_draft_model}  (speculative decoding)")
 
+    # Keep bench focused on model inference by disabling feature-path overhead.
+    bench_settings = settings
+    if settings.agent_enabled or settings.second_brain_enabled or settings.recent_turns > 0:
+        bench_settings = replace(
+            settings,
+            agent_enabled=False,
+            second_brain_enabled=False,
+            recent_turns=0,
+            temperature=0.0,
+        )
+        print("  Bench mode : agent/second-brain/history disabled for cleaner model timing")
+
     # BrainService.__init__ loads + warms up the model (prints its own status lines)
-    brain = BrainService(settings=settings)
+    brain = BrainService(settings=bench_settings)
 
     if settings.llm_backend in {"mlx", "mlx_vlm"}:
         import mlx.core as mx
@@ -305,30 +318,51 @@ def run_bench(settings: config.Settings) -> None:
     for i, prompt in enumerate(_BENCH_PROMPTS, 1):
         t0 = time.perf_counter()
         t_first: float | None = None
-        tokens_out: list[str] = []
+        chunks_out: list[str] = []
 
-        for sentence in brain.think_stream(prompt):
+        for chunk in brain.think_text_stream(prompt):
             if t_first is None:
                 t_first = time.perf_counter()
-            tokens_out.append(sentence)
+            chunks_out.append(chunk)
             # no speak() — pure inference measurement
 
+        t_end = time.perf_counter()
         stats = brain.last_stats
         ttft = (t_first - t0) if t_first else 0.0
+        total_s = t_end - t0
         tps = stats.get("tok_per_sec", 0.0)
+        decode_tps = stats.get("generation_tps")
+        prompt_tps = stats.get("prompt_tps")
+        prompt_tokens = stats.get("prompt_tokens")
         tok = stats.get("tokens", "?")
-        results.append(tps)
+        metric_tps = (
+            float(decode_tps)
+            if isinstance(decode_tps, (int, float))
+            else float(tps)
+            if isinstance(tps, (int, float))
+            else None
+        )
+        if metric_tps is not None:
+            results.append(metric_tps)
 
-        response_preview = " ".join(tokens_out)[:72]
+        response_preview = "".join(chunks_out).replace("\n", " ")[:72]
         print(f"  [{i}] {prompt}")
         print(f"       → {response_preview}")
-        print(f"       TTFT: {ttft:.2f}s | {tok} tok @ {tps:.1f} tok/s\n")
+        details = f"       TTFT: {ttft:.2f}s | total: {total_s:.2f}s | {tok} tok"
+        if metric_tps is not None:
+            details += f" | decode @ {metric_tps:.1f} tok/s"
+        print(details)
+        if isinstance(prompt_tokens, int) and isinstance(prompt_tps, (int, float)):
+            print(f"       prefill: {prompt_tokens} tok @ {float(prompt_tps):.1f} tok/s")
+        print()
 
     if results:
         avg = sum(results) / len(results)
         print(f"  avg throughput : {avg:.1f} tok/s")
-        model_name = settings.mlx_model.split("/")[-1]
-        if "1.5B" in model_name or "1.5b" in model_name:
+        model_name = bench_settings.mlx_model.split("/")[-1]
+        if bench_settings.llm_backend == "mlx_vlm":
+            expected = "~lower than mlx-lm on text-only tasks (VLM backend overhead)"
+        elif "1.5B" in model_name or "1.5b" in model_name:
             expected = "~40–60 tok/s"
         elif "3B" in model_name or "3b" in model_name:
             expected = "~20–35 tok/s"

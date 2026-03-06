@@ -178,7 +178,6 @@ class GenerationRuntime:
                     prompt=prompt,
                     max_tokens=tokens,
                     temperature=temp,
-                    prefill_step_size=None,
                 )
             )
         elif self.backend == _BACKEND_MLX:
@@ -194,6 +193,10 @@ class GenerationRuntime:
 
         total_tokens = 0
         pure_gen_s = 0.0
+        prompt_tokens: int | None = None
+        prompt_tps: float | None = None
+        generation_tps: float | None = None
+        peak_memory_gb: float | None = None
         try:
             while True:
                 t_tok = time.perf_counter()
@@ -204,6 +207,22 @@ class GenerationRuntime:
                 pure_gen_s += time.perf_counter() - t_tok
                 text = chunk.text if hasattr(chunk, "text") else str(chunk)
                 total_tokens = getattr(chunk, "generation_tokens", total_tokens + 1)
+                if hasattr(chunk, "prompt_tokens"):
+                    value = getattr(chunk, "prompt_tokens", None)
+                    if isinstance(value, int):
+                        prompt_tokens = value
+                if hasattr(chunk, "prompt_tps"):
+                    value = getattr(chunk, "prompt_tps", None)
+                    if isinstance(value, (int, float)):
+                        prompt_tps = float(value)
+                if hasattr(chunk, "generation_tps"):
+                    value = getattr(chunk, "generation_tps", None)
+                    if isinstance(value, (int, float)):
+                        generation_tps = float(value)
+                if hasattr(chunk, "peak_memory"):
+                    value = getattr(chunk, "peak_memory", None)
+                    if isinstance(value, (int, float)):
+                        peak_memory_gb = float(value)
                 if text:
                     yield text
         finally:
@@ -217,3 +236,11 @@ class GenerationRuntime:
                         "tok_per_sec": total_tokens / pure_gen_s if pure_gen_s > 0 else 0.0,
                     }
                 )
+                if prompt_tokens is not None:
+                    self.last_stats["prompt_tokens"] = prompt_tokens
+                if prompt_tps is not None:
+                    self.last_stats["prompt_tps"] = prompt_tps
+                if generation_tps is not None:
+                    self.last_stats["generation_tps"] = generation_tps
+                if peak_memory_gb is not None:
+                    self.last_stats["peak_memory_gb"] = peak_memory_gb
