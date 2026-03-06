@@ -57,6 +57,8 @@ _ALT_ATTR_RE = re.compile(
 _JSON_CALL_RE = re.compile(r"^\s*(\{.*\})\s*$", re.DOTALL)
 _ATTR_RE = re.compile(r'(\w+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|(\S+))')
 _JSON_ENVELOPE_RE = re.compile(r"\{.*\}", re.DOTALL)
+_CODE_FENCE_OPEN_RE = re.compile(r"^\s*```(?:json)?\s*", re.IGNORECASE)
+_CODE_FENCE_CLOSE_RE = re.compile(r"\s*```\s*$", re.IGNORECASE)
 
 
 def _normalize_tool_name(name: str) -> str:
@@ -125,9 +127,35 @@ def _parse_tool_body(body: str) -> tuple[str, dict]:
     return tool_name, inferred
 
 
+def _strip_code_fence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    stripped = _CODE_FENCE_OPEN_RE.sub("", stripped, count=1)
+    stripped = _CODE_FENCE_CLOSE_RE.sub("", stripped, count=1)
+    return stripped.strip()
+
+
+def _decode_json_object(candidate: str, *, max_trim: int = 3) -> dict | None:
+    text = _strip_code_fence(candidate)
+    for _ in range(max(0, int(max_trim)) + 1):
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            if text.endswith("}"):
+                text = text[:-1].rstrip()
+                continue
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+        return None
+    return None
+
+
 def _parse_json_envelope(raw: str) -> ParsedStep | None:
     candidates: list[str] = []
     stripped = raw.strip()
+    stripped = _strip_code_fence(stripped)
     if stripped.startswith("{") and stripped.endswith("}"):
         candidates.append(stripped)
     match = _JSON_ENVELOPE_RE.search(raw)
@@ -137,11 +165,8 @@ def _parse_json_envelope(raw: str) -> ParsedStep | None:
             candidates.append(candidate)
 
     for candidate in candidates:
-        try:
-            payload = json.loads(candidate)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if not isinstance(payload, dict):
+        payload = _decode_json_object(candidate)
+        if payload is None:
             continue
 
         thought = payload.get("thought")
