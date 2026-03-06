@@ -41,10 +41,11 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import date, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import config
+from core.platform.proactive_policy import ProactivePolicyEngine
 
 # TYPE_CHECKING guard avoids a circular import at runtime:
 #   heartbeat → brain → (everything).  The types are only needed for
@@ -75,6 +76,7 @@ class HeartbeatAgent:
         self._brain = brain
         self._coordinator = coordinator
         self._settings = settings
+        self._policy = ProactivePolicyEngine()
         # Monotonic timestamp of the last proactive speech event.
         # Starts at 0.0 so the debounce check passes immediately on first tick.
         self._last_proactive: float = 0.0
@@ -183,28 +185,14 @@ class HeartbeatAgent:
         if entity_store is None:
             return None
 
-        today = date.today().isoformat()  # "YYYY-MM-DD" — same format as EntityStore.due_date
-        due_items: list[str] = []
-
-        for kind in ("task", "commitment"):
-            try:
-                entities = entity_store.get_by_kind(kind, status="active")
-            except Exception:
-                logger.exception("HeartbeatAgent: failed to fetch %s entities", kind)
-                continue
-            for entity in entities:
-                if not entity.due_date or entity.due_date > today:
-                    continue  # no due date, or due in the future
-                suffix = " (overdue)" if entity.due_date < today else " (due today)"
-                due_items.append(entity.value + suffix)
-
-        if not due_items:
+        try:
+            message = self._policy.compose_due_digest(
+                entity_store=entity_store,
+                user_name=self._settings.user_name,
+            )
+        except Exception:
+            logger.exception("HeartbeatAgent: failed to compose due digest")
             return None
-
-        name = self._settings.user_name
-        if len(due_items) == 1:
-            return f"Hey {name}, just a reminder: {due_items[0]}."
-        # Limit to 3 items in speech to keep the message short; the user can
-        # ask "what else?" if they want the full list.
-        items_str = "; ".join(due_items[:3])
-        return f"Hey {name}, you have {len(due_items)} things due: {items_str}."
+        if not message:
+            return None
+        return message

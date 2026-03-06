@@ -29,6 +29,22 @@ class TestIntentSignals(unittest.TestCase):
         text = "Is the new MacBook Neo or my local machine better?"
         self.assertTrue(DEFAULT_SIGNALS.has(text, "needs_tools"))
 
+    def test_shell_system_request_needs_tools(self) -> None:
+        text = "Use shell to show current directory and date."
+        self.assertTrue(DEFAULT_SIGNALS.has(text, "needs_tools"))
+
+    def test_reminder_request_needs_tools(self) -> None:
+        text = "Add a reminder: Pay rent due 2026-03-09."
+        self.assertTrue(DEFAULT_SIGNALS.has(text, "needs_tools"))
+
+    def test_memory_write_request_needs_tools(self) -> None:
+        text = "Remember this preference: I prefer concise answers."
+        self.assertTrue(DEFAULT_SIGNALS.has(text, "needs_tools"))
+
+    def test_degraded_connector_query_counts_as_capability_query(self) -> None:
+        text = "Which connectors look degraded right now based on recent failures?"
+        self.assertTrue(DEFAULT_SIGNALS.has(text, "capability_query"))
+
     def test_weighted_score_supports_mixed_intents(self) -> None:
         score = DEFAULT_SIGNALS.weighted_score(
             "what connectors can you use right now",

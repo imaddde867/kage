@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import warnings
 
-from core.agent.tool_base import Tool, ToolResult
+from core.agent.tool_base import Tool, ToolOutcome, ToolResult
 
 _DDGS = None  # type: ignore[assignment]
 with warnings.catch_warnings():
@@ -73,6 +73,13 @@ class WebSearchTool(Tool):
                 tool_name=self.name,
                 content="DuckDuckGo search is not installed. Run: pip install ddgs",
                 is_error=True,
+                outcome=ToolOutcome(
+                    status="error",
+                    structured=None,
+                    sources=[],
+                    retryable=True,
+                    side_effects=False,
+                ),
             )
         try:
             limit = max(1, min(int(max_results), _MAX_RESULTS))
@@ -84,12 +91,30 @@ class WebSearchTool(Tool):
                 warnings.filterwarnings("ignore")
                 results = list(_DDGS().text(query, max_results=limit))
         except Exception as exc:
-            return ToolResult(tool_name=self.name, content=f"Search failed: {exc}", is_error=True)
+            return ToolResult(
+                tool_name=self.name,
+                content=f"Search failed: {exc}",
+                is_error=True,
+                outcome=ToolOutcome(
+                    status="error",
+                    structured=None,
+                    sources=[],
+                    retryable=True,
+                    side_effects=False,
+                ),
+            )
 
         if not results:
             return ToolResult(
                 tool_name=self.name,
                 content=json.dumps({"query": query, "results": []}, ensure_ascii=False),
+                outcome=ToolOutcome(
+                    status="ok",
+                    structured={"query": query, "results": []},
+                    sources=[],
+                    retryable=False,
+                    side_effects=False,
+                ),
             )
 
         rows: list[dict[str, str]] = []
@@ -109,4 +134,15 @@ class WebSearchTool(Tool):
             )
 
         payload = self._compact_payload(query=query, rows=rows)
-        return ToolResult(tool_name=self.name, content=payload)
+        sources = [row["url"] for row in rows if isinstance(row.get("url"), str)]
+        return ToolResult(
+            tool_name=self.name,
+            content=payload,
+            outcome=ToolOutcome(
+                status="ok",
+                structured={"query": query, "results": rows},
+                sources=sources,
+                retryable=False,
+                side_effects=False,
+            ),
+        )

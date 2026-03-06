@@ -18,7 +18,7 @@ import warnings
 from urllib.parse import urlparse
 
 import config as _config
-from core.agent.tool_base import Tool, ToolResult
+from core.agent.tool_base import Tool, ToolOutcome, ToolResult
 
 try:
     from scrapling.fetchers import Fetcher as _ScraplingFetcher  # type: ignore[import]
@@ -238,6 +238,33 @@ def _clamp_max_chars(max_chars: int) -> int:
     return max(500, min(requested, _MAX_ALLOWED_CHARS))
 
 
+def _tool_result(
+    *,
+    tool_name: str,
+    content: str,
+    is_error: bool = False,
+    structured: dict | None = None,
+    sources: list[str] | None = None,
+    retryable: bool | None = None,
+) -> ToolResult:
+    if retryable is None:
+        retryable = is_error
+    src = list(sources or [])
+    status = "error" if is_error else "ok"
+    return ToolResult(
+        tool_name=tool_name,
+        content=content,
+        is_error=is_error,
+        outcome=ToolOutcome(
+            status=status,
+            structured=structured,
+            sources=src,
+            retryable=retryable,
+            side_effects=False,
+        ),
+    )
+
+
 class WebFetchTool(Tool):
     """Fetch a URL and return readable text content.
 
@@ -271,7 +298,7 @@ class WebFetchTool(Tool):
         normalized_url = _normalize_url(url)
         parsed = urlparse(normalized_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            return ToolResult(
+            return _tool_result(
                 tool_name=self.name,
                 content=f"Invalid URL: {url!r}. Provide a full http/https URL.",
                 is_error=True,
@@ -294,29 +321,34 @@ class WebFetchTool(Tool):
                 final_url = _response_url(response, normalized_url)
                 code = _status_code(response)
                 if code in {401, 403, 429}:
-                    return ToolResult(
+                    return _tool_result(
                         tool_name=self.name,
                         content=_blocked_content(final_url, code),
                         is_error=True,
+                        sources=[final_url],
                     )
                 if _looks_like_block_url(final_url):
-                    return ToolResult(
+                    return _tool_result(
                         tool_name=self.name,
                         content=_blocked_content(final_url, code),
                         is_error=True,
+                        sources=[final_url],
                     )
                 text = _extract_text_from_scrapling_response(response)
                 if text:
                     if _looks_like_block_page(text):
-                        return ToolResult(
+                        return _tool_result(
                             tool_name=self.name,
                             content=_blocked_content(final_url, code),
                             is_error=True,
+                            sources=[final_url],
                         )
                     status_suffix = f" (status {code})" if code is not None else ""
-                    return ToolResult(
+                    return _tool_result(
                         tool_name=self.name,
                         content=f"URL: {final_url}{status_suffix}\n{text[:limit]}",
+                        structured={"url": final_url, "text": text[:limit], "status": code},
+                        sources=[final_url],
                     )
                 attempts.append("Scrapling returned no readable content.")
             except Exception as exc:
@@ -339,13 +371,14 @@ class WebFetchTool(Tool):
             attempts.append("httpx unavailable.")
 
         details = " | ".join(attempts)
-        return ToolResult(
+        return _tool_result(
             tool_name=self.name,
             content=(
                 f"Fetch failed for {normalized_url}. {details} "
                 'Install with: pip install "scrapling[fetchers]" httpx trafilatura'
             ),
             is_error=True,
+            sources=[normalized_url],
         )
 
     def _httpx_fetch(
@@ -387,45 +420,54 @@ class WebFetchTool(Tool):
             elif certifi_retry:
                 annotation = " [CA bundle: certifi]"
             if status_code in {401, 403, 429}:
-                return ToolResult(
+                return _tool_result(
                     tool_name=self.name,
                     content=_blocked_content(final_url, status_code),
                     is_error=True,
+                    sources=[final_url],
                 )
             if _looks_like_block_url(final_url):
-                return ToolResult(
+                return _tool_result(
                     tool_name=self.name,
                     content=_blocked_content(final_url, status_code),
                     is_error=True,
+                    sources=[final_url],
                 )
             response.raise_for_status()
 
             # Prefer raw JSON when Content-Type signals it, or body parses cleanly.
             if _is_json_content_type(response.headers):
                 json_text = _try_parse_json(response.text) or response.text
-                return ToolResult(
+                return _tool_result(
                     tool_name=self.name,
                     content=f"URL: {final_url}{annotation}\n{json_text[:limit]}",
+                    structured={"url": final_url, "json": json_text[:limit]},
+                    sources=[final_url],
                 )
 
             json_parsed = _try_parse_json(response.text)
             if json_parsed is not None:
-                return ToolResult(
+                return _tool_result(
                     tool_name=self.name,
                     content=f"URL: {final_url}{annotation}\n{json_parsed[:limit]}",
+                    structured={"url": final_url, "json": json_parsed[:limit]},
+                    sources=[final_url],
                 )
 
             text = _extract_text_from_html(response.text)
             if text:
                 if _looks_like_block_page(text):
-                    return ToolResult(
+                    return _tool_result(
                         tool_name=self.name,
                         content=_blocked_content(final_url, status_code),
                         is_error=True,
+                        sources=[final_url],
                     )
-                return ToolResult(
+                return _tool_result(
                     tool_name=self.name,
                     content=f"URL: {final_url}{annotation}\n{text[:limit]}",
+                    structured={"url": final_url, "text": text[:limit], "status": status_code},
+                    sources=[final_url],
                 )
             attempts.append("HTTP fallback returned no readable content.")
             return None

@@ -61,6 +61,12 @@ _DEFAULT_RULES: tuple[SignalRule, ...] = (
     SignalRule("capability_query", r"\b(what|which)\s+(connectors?|tools?)\s+can\s+you\s+use\b", 1.0),
     SignalRule("capability_query", r"\bwhat do you have access to\b", 1.0),
     SignalRule("capability_query", r"\bwhat can you access\b", 1.0),
+    SignalRule(
+        "capability_query",
+        r"\b(degraded|failing|failures?|health|status)\b.*\b(connectors?|tools?)\b"
+        r"|\b(connectors?|tools?)\b.*\b(degraded|failing|failures?|health|status)\b",
+        1.0,
+    ),
     SignalRule("task_context", r"\b(my tasks?|open tasks?|todo|to-?do|commitments?)\b", 1.0),
     SignalRule("task_context", r"\b(what should i do next|what should i work on|what'?s next)\b", 1.0),
     SignalRule("task_context", r"\b(continue planning|my trip plan|on my plate)\b", 1.0),
@@ -70,6 +76,10 @@ _DEFAULT_RULES: tuple[SignalRule, ...] = (
     SignalRule("needs_tools", r"\b(weather|price|stock|flight|tickets?|bookings?)\b", 1.0),
     SignalRule("needs_tools", r"\b(search|look up|fetch|online|web)\b", 1.0),
     SignalRule("needs_tools", r"\b(calendar|appointment|schedule|dentist|meeting)\b", 1.0),
+    SignalRule("needs_tools", r"\b(remind(?: me)?|reminder|set a reminder|add a reminder)\b", 1.0),
+    SignalRule("needs_tools", r"\b(remember this|store this|save this|mark task|mark .* as done)\b", 1.0),
+    SignalRule("needs_tools", r"\b(use|run|execute)\s+(the\s+)?(shell|terminal)\b", 1.0),
+    SignalRule("needs_tools", r"\b(os version|cpu architecture|current directory|uname|pwd|sw_vers)\b", 1.0),
     SignalRule("needs_tools", r"\b(latest|recent updates?|current|today'?s?|right now|breaking news|live)\b", 1.0),
     SignalRule(
         "needs_tools",

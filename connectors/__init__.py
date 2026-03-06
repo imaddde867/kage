@@ -19,8 +19,8 @@ memory_ops.py       Read/write EntityStore from agent turns:
 notify.py           macOS system notification (NotifyTool) and
                     direct TTS speech (SpeakTool) via core.speaker.
 
-shell.py            Run an allowlisted shell command safely (no pipes,
-                    no sudo, no redirection).
+shell.py            Read-only shell connector (`shell`) plus gated mutation
+                    connector (`shell_mutation`) with explicit confirmation.
 
 apple_calendar.py   Read upcoming Calendar events and add Reminders,
                     both via osascript (macOS only).

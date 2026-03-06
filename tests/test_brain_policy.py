@@ -233,15 +233,44 @@ class BrainPolicyTests(unittest.TestCase):
 
     def test_capability_response_lists_registered_tools(self) -> None:
         brain = BrainService.__new__(BrainService)
+        brain.settings = SimpleNamespace(agent_enabled=True)
         fake_registry = MagicMock()
         fake_registry.names.return_value = ["web_search", "web_fetch", "calendar_read"]
         brain._tool_registry = fake_registry
+        brain.tool_health = MagicMock(return_value=1.0)
 
         reply = brain._capability_response("what connectors can you use?")
         self.assertIsNotNone(reply)
         assert reply is not None
         self.assertIn("web_search", reply)
         self.assertIn("calendar_read", reply)
+
+    def test_capability_response_mentions_disabled_agent_mode(self) -> None:
+        brain = BrainService.__new__(BrainService)
+        brain.settings = SimpleNamespace(agent_enabled=False)
+        fake_registry = MagicMock()
+        fake_registry.names.return_value = ["shell", "web_search"]
+        brain._tool_registry = fake_registry
+        brain.tool_health = MagicMock(return_value=1.0)
+
+        reply = brain._capability_response("what connectors can you access right now?")
+        self.assertIsNotNone(reply)
+        assert reply is not None
+        self.assertIn("Agent mode: disabled", reply)
+        self.assertIn("local: shell", reply)
+        self.assertIn("web: web_search", reply)
+
+    def test_tooling_unavailable_response_mentions_required_flags(self) -> None:
+        brain = BrainService.__new__(BrainService)
+        brain.settings = SimpleNamespace(agent_enabled=False, second_brain_enabled=False)
+
+        reply = brain.tooling_unavailable_response(
+            "Remember this preference: I prefer concise answers.",
+            decision=SimpleNamespace(),
+            catalog=SimpleNamespace(),
+        )
+        self.assertIn("AGENT_ENABLED=false", reply)
+        self.assertIn("SECOND_BRAIN_ENABLED=true", reply)
 
 
 # ---------------------------------------------------------------------------

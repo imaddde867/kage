@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ except ImportError:  # pragma: no cover - optional in test environments
 
 import config
 
+logger = logging.getLogger(__name__)
 _MODEL_LOCK = threading.Lock()
 _SPEAK_LOCK = threading.Lock()
 _SPEAK_STOP_EVENT = threading.Event()
@@ -83,9 +85,9 @@ def _load_model(settings: config.Settings) -> Any:
                 "mlx-audio TTS is not installed. Install it with: pip install 'mlx-audio[tts]'"
             ) from exc
 
-        print(f"[Speaker] Loading Kokoro model {settings.kokoro_model}…", flush=True)
+        logger.info("Loading Kokoro model %s", settings.kokoro_model)
         _KOKORO_MODEL = mlx_load_model(settings.kokoro_model, lazy=True)
-        print("[Speaker] Kokoro ready.", flush=True)
+        logger.info("Kokoro ready")
 
     return _KOKORO_MODEL
 

@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import sqlite3
-import uuid
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 import re
 
 import config
+from core.platform.storage import ConversationStore, connect_db
 
 _DB_FILENAME = "kage_memory.db"
-_SCAN_LIMIT = 100
 _RECALL_CHAR_BUDGET = 900
 _ENTRY_CHAR_LIMIT = 220
 _TOKEN_RE = re.compile(r"[a-z0-9']+")
@@ -76,149 +73,25 @@ class MemoryStore:
         default_path = Path(config.get().memory_dir).expanduser() / _DB_FILENAME
         self.db_path = Path(self.db_path).expanduser() if self.db_path is not None else default_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+        self._conversation = ConversationStore(self.db_path)
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(str(self.db_path))
+    def _connect(self):
+        return connect_db(self.db_path)
 
     def _init_schema(self) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS conversations (
-                    id TEXT PRIMARY KEY,
-                    user_input TEXT,
-                    kage_response TEXT,
-                    timestamp TEXT
-                )
-                """
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_conversations_timestamp ON conversations(timestamp)"
-            )
-        self._init_schema_entities()
+        # Backward-compat shim: schema initialization is now centralized in
+        # core.platform.storage.schema via ConversationStore.
+        self._conversation = ConversationStore(self.db_path)
 
     def _init_schema_entities(self) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS entities (
-                    id         TEXT PRIMARY KEY,
-                    kind       TEXT NOT NULL,
-                    key        TEXT NOT NULL,
-                    value      TEXT NOT NULL,
-                    status     TEXT DEFAULT 'active',
-                    due_date   TEXT,
-                    source_id  TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_kind ON entities(kind)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_status ON entities(status)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_key ON entities(kind, key)")
+        # Backward-compat shim retained for older callers.
+        self._conversation = ConversationStore(self.db_path)
 
     def store_exchange(self, user_input: str, assistant_response: str) -> str:
-        exchange_id = str(uuid.uuid4())
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO conversations (id, user_input, kage_response, timestamp) VALUES (?, ?, ?, ?)",
-                (exchange_id, user_input, assistant_response, datetime.now().isoformat()),
-            )
-        return exchange_id
+        return self._conversation.store_exchange(user_input, assistant_response)
 
     def recent_turns(self, limit: int = 4, *, max_chars: int = _ENTRY_CHAR_LIMIT) -> list[tuple[str, str]]:
-        if limit <= 0:
-            return []
-
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT user_input, kage_response FROM conversations ORDER BY timestamp DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-
-        turns: list[tuple[str, str]] = []
-        for user_text, reply_text in reversed(rows):
-            user = _truncate(user_text or "", max_chars)
-            reply = _truncate(reply_text or "", max_chars)
-            if not user and not reply:
-                continue
-            turns.append((user, reply))
-        return turns
+        return self._conversation.recent_turns(limit=limit, max_chars=max_chars)
 
     def recall(self, query: str, n_results: int = 5, *, char_budget: int = _RECALL_CHAR_BUDGET) -> str:
-        if n_results <= 0 or char_budget <= 0:
-            return ""
-
-        query_tokens = {
-            token
-            for token in _tokens(query)
-            if len(token) >= 3 and token not in _STOPWORDS
-        }
-        if not query_tokens:
-            return ""
-
-        query_phrase = _normalize(query).lower()
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT user_input, kage_response, timestamp FROM conversations ORDER BY timestamp DESC LIMIT ?",
-                (_SCAN_LIMIT,),
-            ).fetchall()
-
-        matches: list[tuple[float, str, str]] = []
-        for idx, row in enumerate(rows):
-            user_text, reply_text, _timestamp = row
-            user_text = _normalize(user_text or "")
-            reply_text = _normalize(reply_text or "")
-            haystack = f"{user_text}\n{reply_text}".lower()
-            tokens = _tokens(haystack)
-            overlap = len(query_tokens & tokens)
-            if overlap == 0:
-                continue
-
-            phrase_bonus = 2 if query_phrase and query_phrase in haystack else 0
-            recency_bonus = max(0.0, 1.0 - (idx / max(len(rows), 1)))
-            score = (overlap * 3) + phrase_bonus + (recency_bonus * 3)
-            matches.append((score, user_text, reply_text))
-
-        matches.sort(key=lambda x: x[0], reverse=True)
-        if not matches:
-            return ""
-
-        parts = ["--- Relevant past exchanges ---"]
-        seen: set[str] = set()
-        seen_users: set[str] = set()
-        remaining = char_budget - len(parts[0])
-        if remaining <= 0:
-            return ""
-
-        added = 0
-        for _, user_text, reply_text in matches:
-            if added >= n_results:
-                break
-
-            key = _normalize(f"{user_text}\n{reply_text}").lower()
-            user_key = _normalize(user_text).lower()
-            if key in seen:
-                continue
-            if user_key and user_key in seen_users:
-                continue
-            seen.add(key)
-            if user_key:
-                seen_users.add(user_key)
-
-            u = _truncate(user_text, _ENTRY_CHAR_LIMIT)
-            a = _truncate(reply_text, _ENTRY_CHAR_LIMIT)
-            entry = f"User: {u}\nKage: {a}"
-
-            cost = len(entry) + 1
-            if cost > remaining:
-                continue
-            parts.append(entry)
-            remaining -= cost
-            added += 1
-
-        if len(parts) == 1:
-            return ""
-        return "\n".join(parts)
+        return self._conversation.recall(query, n_results=n_results, char_budget=char_budget)
