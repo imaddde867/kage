@@ -171,6 +171,23 @@ class TestParseStep(unittest.TestCase):
         self.assertEqual(step.tool_call.name, "web_fetch")
         self.assertEqual(step.tool_call.args, {})
 
+    def test_json_tool_envelope_with_prefix_and_extra_brace_is_recovered(self):
+        raw = (
+            'Tool call:\n'
+            '{"type":"tool","thought":"run shell","tool":"shell","args":{"command":"uname -a"}}}'
+        )
+        step = parse_step(raw)
+        self.assertIsNotNone(step.tool_call)
+        assert step.tool_call is not None
+        self.assertEqual(step.tool_call.name, "shell")
+        self.assertEqual(step.tool_call.args.get("command"), "uname -a")
+
+    def test_json_answer_envelope_inside_code_fence(self):
+        raw = '```json\n{"type":"answer","answer":"ok"}\n```'
+        step = parse_step(raw)
+        self.assertIsNone(step.tool_call)
+        self.assertEqual(step.answer, "ok")
+
     def test_return_type_is_parsed_step(self):
         """parse_step always returns a ParsedStep dataclass instance."""
         self.assertIsInstance(parse_step("<answer>hi</answer>"), ParsedStep)

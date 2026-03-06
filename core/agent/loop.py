@@ -91,6 +91,7 @@ Rules:
 - Do not fetch more than 2 URLs in one request
 - For comparison tasks, gather evidence for each side before concluding
 - For "my local machine" questions, use shell commands for system facts instead of guessing
+- shell only accepts a single read-only command (no &&, pipes, redirects, or semicolons)
 - For comparison/performance questions, do not finalize until you have at least one relevant tool result
 - When reporting web facts, always cite the source URL in your answer
 - Do not claim to have searched or fetched data unless a tool result supports it
