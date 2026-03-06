@@ -252,6 +252,14 @@ class TestWebSearchTool(unittest.TestCase):
         mock_ddgs_cls.return_value.text.assert_called_once_with("Python 3.13 release", max_results=5)
 
     @patch("connectors.web_search._DDGS")
+    def test_empty_query_returns_input_error(self, mock_ddgs_cls: MagicMock) -> None:
+        result = self.tool.execute(query="   ")
+        self.assertTrue(result.is_error)
+        self.assertIn("invalid search query", result.content.lower())
+        self.assertFalse(result.outcome.retryable)
+        mock_ddgs_cls.return_value.text.assert_not_called()
+
+    @patch("connectors.web_search._DDGS")
     def test_no_results(self, mock_ddgs_cls: MagicMock) -> None:
         """An empty result list returns an empty structured result payload."""
         mock_ddgs_cls.return_value.text.return_value = []
@@ -268,6 +276,19 @@ class TestWebSearchTool(unittest.TestCase):
         result = self.tool.execute(query="anything")
         self.assertTrue(result.is_error)
         self.assertIn("Search failed", result.content)
+        self.assertTrue(result.outcome.retryable)
+
+    @patch("connectors.web_search._DDGS")
+    def test_retry_once_on_transient_error_then_success(self, mock_ddgs_cls: MagicMock) -> None:
+        mock_ddgs_cls.return_value.text.side_effect = [
+            ConnectionError("temporary network outage"),
+            [{"title": "Recovered", "body": "ok", "href": "https://example.com"}],
+        ]
+        result = self.tool.execute(query="resilient search")
+        self.assertFalse(result.is_error)
+        payload = json.loads(result.content)
+        self.assertEqual(len(payload["results"]), 1)
+        self.assertEqual(mock_ddgs_cls.return_value.text.call_count, 2)
 
     @patch("connectors.web_search._DDGS")
     def test_max_results_clamped(self, mock_ddgs_cls: MagicMock) -> None:
@@ -275,6 +296,19 @@ class TestWebSearchTool(unittest.TestCase):
         mock_ddgs_cls.return_value.text.return_value = []
         self.tool.execute(query="anything", max_results=999)
         mock_ddgs_cls.return_value.text.assert_called_once_with("anything", max_results=10)
+
+    @patch("connectors.web_search._DDGS")
+    def test_malformed_result_rows_are_ignored(self, mock_ddgs_cls: MagicMock) -> None:
+        mock_ddgs_cls.return_value.text.return_value = [
+            "bad row",
+            {"title": "No URL"},
+            {"title": "Valid", "body": "snippet", "href": "https://example.com/ok"},
+        ]
+        result = self.tool.execute(query="mixed rows")
+        self.assertFalse(result.is_error)
+        payload = json.loads(result.content)
+        self.assertEqual(len(payload["results"]), 1)
+        self.assertEqual(payload["results"][0]["url"], "https://example.com/ok")
 
     @patch("connectors.web_search._DDGS")
     def test_output_is_size_capped(self, mock_ddgs_cls: MagicMock) -> None:
@@ -375,6 +409,11 @@ class TestWebFetchTool(unittest.TestCase):
         result = self.tool.execute(url="not-a-url")
         self.assertTrue(result.is_error)
         self.assertIn("Invalid URL", result.content)
+
+    def test_invalid_url_type(self) -> None:
+        result = self.tool.execute(url=123)  # type: ignore[arg-type]
+        self.assertTrue(result.is_error)
+        self.assertIn("Invalid URL type", result.content)
 
     @patch("connectors.web_fetch._HTTPX", None)
     @patch("connectors.web_fetch._ScraplingFetcher", None)

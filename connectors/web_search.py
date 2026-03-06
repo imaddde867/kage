@@ -23,9 +23,32 @@ with warnings.catch_warnings():
 
 _DEFAULT_RESULTS = 5
 _MAX_RESULTS = 10
+_MAX_QUERY_CHARS = 300
 _SNIPPET_MAX_CHARS = 200
 _RESULT_TITLE_MAX_CHARS = 180
 _MAX_CONTENT_CHARS = 2500
+_SEARCH_ATTEMPTS = 2
+_TRANSIENT_ERROR_MARKERS = (
+    "timeout",
+    "tempor",
+    "connection",
+    "network",
+    "try again",
+    "rate limit",
+    "too many requests",
+    "unavailable",
+    "429",
+    "502",
+    "503",
+    "504",
+)
+
+
+def _is_transient_search_error(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    message = str(exc).lower()
+    return any(marker in message for marker in _TRANSIENT_ERROR_MARKERS)
 
 
 class WebSearchTool(Tool):
@@ -48,6 +71,49 @@ class WebSearchTool(Tool):
         "required": ["query"],
     }
 
+    def _error_result(self, message: str, *, retryable: bool) -> ToolResult:
+        return ToolResult(
+            tool_name=self.name,
+            content=message,
+            is_error=True,
+            outcome=ToolOutcome(
+                status="error",
+                structured=None,
+                sources=[],
+                retryable=retryable,
+                side_effects=False,
+            ),
+        )
+
+    def _normalize_query(self, query: object) -> str:
+        text = str(query).strip()
+        if not text:
+            return ""
+        condensed = " ".join(text.split())
+        return condensed[:_MAX_QUERY_CHARS]
+
+    def _clamp_limit(self, max_results: object) -> int:
+        try:
+            return max(1, min(int(max_results), _MAX_RESULTS))
+        except Exception:
+            return _DEFAULT_RESULTS
+
+    def _fetch_results(self, query: str, *, limit: int) -> list[object]:
+        last_exc: Exception | None = None
+        for attempt in range(_SEARCH_ATTEMPTS):
+            try:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore")
+                    return list(_DDGS().text(query, max_results=limit))
+            except Exception as exc:
+                last_exc = exc
+                should_retry = _is_transient_search_error(exc) and attempt + 1 < _SEARCH_ATTEMPTS
+                if not should_retry:
+                    raise
+        if last_exc is not None:
+            raise last_exc
+        return []
+
     def _compact_payload(self, query: str, rows: list[dict[str, str]]) -> str:
         payload: dict[str, object] = {"query": query, "results": []}
         for row in rows:
@@ -69,48 +135,35 @@ class WebSearchTool(Tool):
         """Run a DuckDuckGo text search and return compact structured JSON."""
         del kwargs
         if _DDGS is None:
-            return ToolResult(
-                tool_name=self.name,
-                content="DuckDuckGo search is not installed. Run: pip install ddgs",
-                is_error=True,
-                outcome=ToolOutcome(
-                    status="error",
-                    structured=None,
-                    sources=[],
-                    retryable=True,
-                    side_effects=False,
-                ),
+            return self._error_result(
+                "DuckDuckGo search is not installed. Run: pip install ddgs",
+                retryable=True,
             )
-        try:
-            limit = max(1, min(int(max_results), _MAX_RESULTS))
-        except Exception:
-            limit = _DEFAULT_RESULTS
+
+        query_text = self._normalize_query(query)
+        if not query_text:
+            return self._error_result(
+                "Invalid search query: provide a non-empty text query.",
+                retryable=False,
+            )
+
+        limit = self._clamp_limit(max_results)
 
         try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore")
-                results = list(_DDGS().text(query, max_results=limit))
+            results = self._fetch_results(query_text, limit=limit)
         except Exception as exc:
-            return ToolResult(
-                tool_name=self.name,
-                content=f"Search failed: {exc}",
-                is_error=True,
-                outcome=ToolOutcome(
-                    status="error",
-                    structured=None,
-                    sources=[],
-                    retryable=True,
-                    side_effects=False,
-                ),
+            return self._error_result(
+                f"Search failed: {exc}",
+                retryable=_is_transient_search_error(exc),
             )
 
         if not results:
             return ToolResult(
                 tool_name=self.name,
-                content=json.dumps({"query": query, "results": []}, ensure_ascii=False),
+                content=json.dumps({"query": query_text, "results": []}, ensure_ascii=False),
                 outcome=ToolOutcome(
                     status="ok",
-                    structured={"query": query, "results": []},
+                    structured={"query": query_text, "results": []},
                     sources=[],
                     retryable=False,
                     side_effects=False,
@@ -118,29 +171,33 @@ class WebSearchTool(Tool):
             )
 
         rows: list[dict[str, str]] = []
-        for idx, raw in enumerate(results, start=1):
-            title = (raw.get("title") or "Untitled result").strip()
-            snippet = (raw.get("body") or "").strip()
-            url = (raw.get("href") or raw.get("url") or "").strip()
+        rank = 1
+        for raw in results:
+            if not isinstance(raw, dict):
+                continue
+            title = str(raw.get("title") or "Untitled result").strip()
+            snippet = str(raw.get("body") or "").strip()
+            url = str(raw.get("href") or raw.get("url") or "").strip()
             if not url:
                 continue
             rows.append(
                 {
-                    "rank": idx,
+                    "rank": rank,
                     "title": title[:_RESULT_TITLE_MAX_CHARS],
                     "url": url,
                     "snippet": snippet[:_SNIPPET_MAX_CHARS],
                 }
             )
+            rank += 1
 
-        payload = self._compact_payload(query=query, rows=rows)
+        payload = self._compact_payload(query=query_text, rows=rows)
         sources = [row["url"] for row in rows if isinstance(row.get("url"), str)]
         return ToolResult(
             tool_name=self.name,
             content=payload,
             outcome=ToolOutcome(
                 status="ok",
-                structured={"query": query, "results": rows},
+                structured={"query": query_text, "results": rows},
                 sources=sources,
                 retryable=False,
                 side_effects=False,
