@@ -177,6 +177,12 @@ class TestShellTool(unittest.TestCase):
         self.assertFalse(result.is_error)
         self.assertTrue(result.content.startswith("/"))
 
+    def test_allowed_command_uname(self) -> None:
+        """'uname' is allowlisted for safe local system introspection."""
+        result = self.tool.execute(command="uname -s")
+        self.assertFalse(result.is_error)
+        self.assertTrue(result.content.strip())
+
     def test_blocked_command(self) -> None:
         """'rm' is not on the allowlist — layer 1 rejects it with an error."""
         result = self.tool.execute(command="rm -rf /")

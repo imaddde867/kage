@@ -168,7 +168,7 @@ class Settings:
 def get() -> Settings:
     return Settings(
         llm_backend=_env_str("LLM_BACKEND", "mlx_vlm"),
-        mlx_model=_env_str("MLX_MODEL", "mlx-community/Qwen3.5-4B-MLX-4bit"),
+        mlx_model=_env_str("MLX_MODEL", "mlx-community/Qwen3.5-9B-MLX-4bit"),
         mlx_draft_model=_env_str("MLX_DRAFT_MODEL", ""),
         mlx_max_tokens=_env_int("MLX_MAX_TOKENS", 250),
         temperature=_env_float("TEMPERATURE", 0.3),

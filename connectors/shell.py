@@ -38,6 +38,10 @@ _ALLOWED: frozenset[str] = frozenset({
     "pwd",    # print working directory
     "echo",   # print a string
     "date",   # print current date/time
+    "uname",  # kernel + machine architecture
+    "sw_vers",  # macOS version details
+    "sysctl",  # read kernel/hardware settings
+    "system_profiler",  # macOS hardware/software profile
 })
 
 # Flags that can cause irreversible data loss even on allowlisted commands.

@@ -12,6 +12,7 @@ Test classes:
     TestAgentLoopHistoryStructure — verifies role alternation in the built prompt
     TestAgentLoopContextInjection — entity context appears in system prompt
 """
+import json
 import unittest
 from collections.abc import Iterator
 from dataclasses import replace
@@ -128,6 +129,50 @@ class _BlockedWebFetchTool(Tool):
         )
 
 
+class _WebSearchJsonTool(Tool):
+    name = "web_search"
+    description = "Structured JSON web search"
+    parameters: dict[str, Any] = {}
+
+    def execute(self, **kwargs: Any) -> ToolResult:
+        _ = kwargs
+        payload = {
+            "query": "compare",
+            "results": [
+                {
+                    "rank": 1,
+                    "title": "Example",
+                    "url": "https://en.wikipedia.org/wiki/OpenClaw",
+                    "snippet": "stub",
+                },
+                {
+                    "rank": 2,
+                    "title": "News",
+                    "url": "https://www.cnbc.com/2026/02/02/openclaw.html",
+                    "snippet": "stub",
+                },
+            ],
+        }
+        return ToolResult(tool_name=self.name, content=json.dumps(payload))
+
+
+class _ErrorWebFetchWithDocUrlTool(Tool):
+    name = "web_fetch"
+    description = "Fetch error with extra URL in message"
+    parameters: dict[str, Any] = {}
+
+    def execute(self, **kwargs: Any) -> ToolResult:
+        _ = kwargs
+        return ToolResult(
+            tool_name=self.name,
+            content=(
+                "Fetch failed for https://example.com. "
+                "See https://curl.se/libcurl/c/libcurl-errors.html for curl errors."
+            ),
+            is_error=True,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -161,11 +206,27 @@ class TestAgentLoopDirectAnswer(unittest.TestCase):
         result = "".join(loop.run("What is the answer to life?"))
         self.assertEqual(result, "42 is the answer.")
 
+    def test_answer_sanitizes_internal_tags(self) -> None:
+        raw = "<answer><thought>internal</thought>Only this should be shown.</answer>"
+        loop = self._loop([raw])
+        result = "".join(loop.run("test"))
+        self.assertEqual(result, "Only this should be shown.")
+
     def test_plain_text_fallback(self) -> None:
         """No XML tags at all — raw text is used as the answer via the plain-text fallback."""
         loop = self._loop(["I just know this without tools."])
         result = "".join(loop.run("Tell me something."))
         self.assertEqual(result, "I just know this without tools.")
+
+    def test_malformed_internal_only_output_is_repaired(self) -> None:
+        responses = [
+            "<thought>I now have enough data and I should compare...",
+            "<answer>Your current machine is better for sustained pro workloads.</answer>",
+        ]
+        loop = self._loop(responses)
+        result = "".join(loop.run("Compare my current machine with a new one"))
+        self.assertIn("better for sustained pro workloads", result)
+        self.assertNotIn("<thought>", result.lower())
 
     def test_empty_response_hits_max_steps(self) -> None:
         """Empty generation output produces no answer and no tool call; max_steps=1 triggers cap."""
@@ -246,19 +307,29 @@ class TestAgentLoopToolUse(unittest.TestCase):
         self.assertNotIn("massive escalation", result.lower())
 
     def test_max_steps_cap(self) -> None:
-        """Loop terminates gracefully when tool calls never produce an answer.
-
-        When every response is a tool call with varying args, the repeated-tool
-        guard does not fire.  After max_steps iterations the step-limit message
-        is returned.
-        """
-        # Varying args prevent the repeated-tool guard from firing; only max_steps caps it
+        """When max_steps is reached, loop attempts a final no-tool synthesis pass."""
+        # Varying args prevent the repeated-tool guard from firing; max_steps triggers
+        # forced-finalization, which consumes the 4th scripted response below.
         responses = [
-            f'<tool>upper</tool>\n<input>{{"text": "step{i}"}}</input>' for i in range(20)
+            '<tool>upper</tool>\n<input>{"text": "step1"}</input>',
+            '<tool>upper</tool>\n<input>{"text": "step2"}</input>',
+            '<tool>upper</tool>\n<input>{"text": "step3"}</input>',
+            "<answer>Synthesis: steps completed.</answer>",
         ]
         loop = self._loop(responses, [_UpperTool()])
         result = "".join(loop.run("Loop forever", max_steps=3))
-        self.assertIn("step limit", result.lower())
+        self.assertEqual(result, "Synthesis: steps completed.")
+
+    def test_max_steps_with_no_finalization_output_returns_budget_message(self) -> None:
+        responses = [
+            '<tool>upper</tool>\n<input>{"text":"x1"}</input>',
+            '<tool>upper</tool>\n<input>{"text":"x2"}</input>',
+            '<tool>upper</tool>\n<input>{"text":"x3"}</input>',
+            '<tool>upper</tool>\n<input>{"text":"x4"}</input>',
+        ]
+        loop = self._loop(responses, [_UpperTool()])
+        result = "".join(loop.run("Loop forever", max_steps=3))
+        self.assertIn("step budget", result.lower())
 
     def test_multi_step_two_tool_calls(self) -> None:
         """Two consecutive tool calls followed by a final answer — verifies loop continues correctly."""
@@ -270,6 +341,28 @@ class TestAgentLoopToolUse(unittest.TestCase):
         loop = self._loop(responses, [_UpperTool()])
         result = "".join(loop.run("Uppercase foo and bar"))
         self.assertEqual(result, "Done: FOO and BAR.")
+
+    def test_sources_from_web_search_json_are_clean(self) -> None:
+        responses = [
+            '<tool>web_search</tool>\n<input>{"query":"compare"}</input>',
+            "<answer>Here is the comparison.</answer>",
+        ]
+        loop = self._loop(responses, [_WebSearchJsonTool()])
+        result = "".join(loop.run("Compare A to B and cite sources"))
+        self.assertIn("Sources: https://en.wikipedia.org/wiki/OpenClaw", result)
+        self.assertIn("https://www.cnbc.com/2026/02/02/openclaw.html", result)
+        self.assertNotIn('",,', result)
+
+    def test_error_urls_not_used_as_final_sources(self) -> None:
+        responses = [
+            '<tool>web_fetch</tool>\n<input>{"url":"https://example.com"}</input>',
+            '<tool>web_search</tool>\n<input>{"query":"compare"}</input>',
+            "<answer>Here is the comparison.</answer>",
+        ]
+        loop = self._loop(responses, [_ErrorWebFetchWithDocUrlTool(), _WebSearchJsonTool()])
+        result = "".join(loop.run("Compare A to B and cite sources"))
+        self.assertIn("Sources: https://en.wikipedia.org/wiki/OpenClaw", result)
+        self.assertNotIn("curl.se/libcurl/c/libcurl-errors.html", result)
 
 
 class TestAgentLoopHistoryStructure(unittest.TestCase):

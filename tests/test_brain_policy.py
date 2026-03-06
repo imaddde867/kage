@@ -127,6 +127,13 @@ class BrainPolicyTests(unittest.TestCase):
         prompt = brain._system_prompt(text_mode=True)
         self.assertIn("Markdown, code blocks, and lists are allowed.", prompt)
 
+    def test_system_prompt_allows_general_knowledge(self) -> None:
+        brain = BrainService.__new__(BrainService)
+        brain.settings = SimpleNamespace(user_name="Imad")
+
+        prompt = brain._system_prompt(text_mode=False)
+        self.assertIn("general world knowledge", prompt)
+
     def test_entity_context_injected_when_route_requests_it(self) -> None:
         from core.brain_prompting import build_messages
 
@@ -329,6 +336,60 @@ class TestNeedsToolsRouting(unittest.TestCase):
         brain = self._brain_with_runtime(runtime)
         self.assertFalse(brain._needs_tools("What connectors can you use?"))
         self.assertEqual(runtime._calls, [])
+
+    def test_heuristic_routes_hardware_compare_to_tools(self) -> None:
+        runtime = _ScriptedRuntime(["no"])
+        brain = self._brain_with_runtime(runtime)
+        self.assertTrue(brain._needs_tools("Is the new MacBook Neo or my local machine better?"))
+        self.assertEqual(runtime._calls, [])
+
+
+# ---------------------------------------------------------------------------
+# Exchange persistence / extraction gating
+# ---------------------------------------------------------------------------
+
+class TestPersistExchangeExtractionGating(unittest.TestCase):
+    def _brain(self) -> BrainService:
+        brain = BrainService.__new__(BrainService)
+        brain.settings = SimpleNamespace(recent_turns=0, extraction_enabled=True)
+        brain._recent_turns = deque(maxlen=0)
+        brain.memory = MagicMock()
+        brain.memory.store_exchange.return_value = "ex-1"
+        brain._entity_store = object()
+        brain._extract_and_store = MagicMock()
+        return brain
+
+    def test_route_with_should_extract_false_skips_extractor(self) -> None:
+        brain = self._brain()
+
+        brain._persist_exchange(
+            "What should I work on next?",
+            "Start with task A.",
+            route=SimpleNamespace(should_extract=False),
+        )
+
+        brain._extract_and_store.assert_not_called()
+
+    def test_route_with_should_extract_true_runs_extractor(self) -> None:
+        brain = self._brain()
+
+        brain._persist_exchange(
+            "I prefer concise answers",
+            "Noted.",
+            route=SimpleNamespace(should_extract=True),
+        )
+
+        brain._extract_and_store.assert_called_once_with(
+            "I prefer concise answers",
+            "ex-1",
+        )
+
+    def test_route_none_keeps_default_extraction(self) -> None:
+        brain = self._brain()
+
+        brain._persist_exchange("hello", "hi")
+
+        brain._extract_and_store.assert_called_once_with("hello", "ex-1")
 
 
 # ---------------------------------------------------------------------------

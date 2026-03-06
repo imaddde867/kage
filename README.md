@@ -74,10 +74,16 @@ Notes:
 | Variable          | Default                             | Description                                      |
 | ----------------- | ----------------------------------- | ------------------------------------------------ |
 | `LLM_BACKEND`     | `mlx_vlm`                           | `mlx_vlm` or `mlx`                               |
-| `MLX_MODEL`       | `mlx-community/Qwen3.5-4B-MLX-4bit` | Main model                                       |
+| `MLX_MODEL`       | `mlx-community/Qwen3.5-9B-MLX-4bit` | Active model (swap this value to change models)  |
 | `MLX_DRAFT_MODEL` | ``                                  | Optional speculative draft model (`mlx` backend) |
 | `MLX_MAX_TOKENS`  | `250`                               | Generation cap                                   |
 | `TEMPERATURE`     | `0.3`                               | Sampling temperature for non-agent conversational responses |
+
+Model profiles:
+
+- `mlx-community/Qwen3.5-9B-MLX-4bit` + `LLM_BACKEND=mlx_vlm`
+- `mlx-community/Qwen3.5-4B-MLX-4bit` + `LLM_BACKEND=mlx_vlm`
+- `mlx-community/Qwen2.5-14B-Instruct-MLX-4bit` + `LLM_BACKEND=mlx`
 
 ### Voice / Audio
 
@@ -199,6 +205,21 @@ Run the test suite:
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+Model upgrade benchmarking (performance + deep capability + real-world scenarios):
+
+```bash
+python3 benchmarks/run_model_upgrade_eval.py
+```
+
+Single-model performance-only benchmark:
+
+```bash
+python3 benchmarks/model_perf_benchmark.py \
+  --model mlx-community/Qwen3.5-9B-MLX-4bit \
+  --backend mlx_vlm \
+  --output-dir benchmarks/reports
 ```
 
 Current suite size (as of 2026-03-05): 220 tests.

@@ -12,6 +12,7 @@ Install:
 from __future__ import annotations
 
 import json as _json
+import logging
 import re
 import warnings
 from urllib.parse import urlparse
@@ -23,6 +24,13 @@ try:
     from scrapling.fetchers import Fetcher as _ScraplingFetcher  # type: ignore[import]
 except Exception:
     _ScraplingFetcher = None  # type: ignore[assignment]
+else:
+    # Scrapling configures its own INFO StreamHandler, which pollutes user-facing
+    # terminal output during agent runs. Keep it silent unless explicitly enabled.
+    _scrapling_logger = logging.getLogger("scrapling")
+    _scrapling_logger.handlers = [logging.NullHandler()]
+    _scrapling_logger.propagate = False
+    _scrapling_logger.setLevel(logging.ERROR)
 
 try:
     import httpx as _HTTPX  # type: ignore[import]
