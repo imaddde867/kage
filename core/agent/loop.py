@@ -49,8 +49,10 @@ import re
 import time
 from collections import Counter
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 import config
 from core.agent.parser import parse_step
@@ -118,6 +120,23 @@ _DANGLING_INTERNAL_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 _INTERNAL_TAG_TOKEN_RE = re.compile(r"</?(?:thought|tool|input)\b[^>]*>", re.IGNORECASE)
+
+
+@dataclass
+class _LoopRunState:
+    history: list[tuple[str, str]] = field(default_factory=list)
+    tool_call_counts: Counter[tuple[str, str]] = field(default_factory=Counter)
+    tools_used: set[str] = field(default_factory=set)
+    fetched_urls: set[str] = field(default_factory=set)
+    checked_urls: list[str] = field(default_factory=list)
+    checked_url_keys: set[str] = field(default_factory=set)
+    source_urls: list[str] = field(default_factory=list)
+    source_url_keys: set[str] = field(default_factory=set)
+    fetch_count: int = 0
+    tool_calls: int = 0
+    total_prompt_chars: int = 0
+    web_attempts: int = 0
+    web_successes: int = 0
 
 
 class AgentLoop:
@@ -343,6 +362,201 @@ class AgentLoop:
         cleaned = _ANSWER_PREFIX_RE.sub("", cleaned.strip())
         return cleaned.strip()
 
+    def _canonical_web_url(self, value: str) -> str:
+        candidate = value.strip()
+        if not candidate:
+            return ""
+        if "://" not in candidate and "." in candidate.split("/", 1)[0]:
+            candidate = f"https://{candidate}"
+        parsed = urlparse(candidate)
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower()
+        if scheme not in {"http", "https"} or not host:
+            return candidate
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        default_port = (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+        netloc = host if port is None or default_port else f"{host}:{port}"
+        path = parsed.path or "/"
+        return urlunparse((scheme, netloc, path, parsed.params, parsed.query, ""))
+
+    def _normalized_tool_args(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(args)
+        if tool_name == "web_fetch":
+            url = str(normalized.get("url", "")).strip()
+            if url:
+                normalized["url"] = self._canonical_web_url(url)
+        elif tool_name == "web_search":
+            query = str(normalized.get("query", "")).strip()
+            if query:
+                normalized["query"] = " ".join(query.split())
+        return normalized
+
+    def _tool_call_key(self, tool_name: str, args: dict[str, Any]) -> tuple[str, str]:
+        normalized = self._normalized_tool_args(tool_name, args)
+        try:
+            serialized = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+        except TypeError:
+            serialized = repr(normalized)
+        return tool_name, serialized
+
+    def _live_web_unverified_message(self, checked_urls: list[str]) -> str:
+        fallback = (
+            "I couldn't verify reliable live updates because the available sources were "
+            "blocked or returned unusable pages."
+        )
+        if checked_urls:
+            fallback += f" Sources checked: {', '.join(checked_urls[:3])}."
+        return fallback
+
+    def _append_unique_url(self, url: str, *, keys: set[str], values: list[str]) -> None:
+        cleaned = url.strip()
+        if not cleaned:
+            return
+        key = self._canonical_web_url(cleaned) or cleaned
+        if key in keys:
+            return
+        keys.add(key)
+        values.append(cleaned)
+
+    def _record_web_result(self, *, state: _LoopRunState, result: Any) -> None:
+        state.web_attempts += 1
+        urls = []
+        if result.outcome is not None and result.outcome.sources:
+            urls = list(result.outcome.sources)
+        if not urls:
+            urls = self._extract_urls(result.content)
+        for url in urls:
+            self._append_unique_url(url, keys=state.checked_url_keys, values=state.checked_urls)
+        if not result.is_error and urls:
+            state.web_successes += 1
+            for url in urls:
+                self._append_unique_url(url, keys=state.source_url_keys, values=state.source_urls)
+
+    def _answer_with_guards(
+        self,
+        *,
+        task: str,
+        answer_text: str,
+        tools_used: set[str],
+        web_successes: int,
+        source_urls: list[str],
+    ) -> str:
+        answer = guard_answer_truthfulness(answer_text, tools_used)
+        answer = guard_temporal_uncertainty(task, answer)
+        if web_successes > 0:
+            answer = self._append_sources_if_missing(answer, source_urls)
+        return answer
+
+    def _handle_parsed_answer(
+        self,
+        *,
+        parsed_answer: str,
+        raw: str,
+        task: str,
+        state: _LoopRunState,
+    ) -> str | None:
+        if self._is_live_web_task(task) and state.web_attempts > 0 and state.web_successes == 0:
+            return self._live_web_unverified_message(state.checked_urls)
+
+        answer_text = self._sanitize_user_answer_text(parsed_answer)
+        if not answer_text:
+            self._append_history(
+                state.history,
+                raw,
+                "format_guard",
+                "Invalid final answer format. Return a JSON answer object with user-facing content only.",
+            )
+            return None
+
+        return self._answer_with_guards(
+            task=task,
+            answer_text=answer_text,
+            tools_used=state.tools_used,
+            web_successes=state.web_successes,
+            source_urls=state.source_urls,
+        )
+
+    def _handle_tool_call(
+        self,
+        *,
+        tool_call: Any,
+        raw: str,
+        state: _LoopRunState,
+    ) -> str | None:
+        logger.debug("Tool call: %s(%s)", tool_call.name, tool_call.args)
+        call_key = self._tool_call_key(tool_call.name, tool_call.args)
+        state.tool_call_counts[call_key] += 1
+        if state.tool_call_counts[call_key] >= 3:
+            logger.warning("Repeated tool call detected (%s x3) — forcing answer", call_key[0])
+            logger.debug(
+                "AgentLoop bailed after repeated calls (tool_calls=%d total_prompt_chars=%d)",
+                state.tool_calls,
+                state.total_prompt_chars,
+            )
+            return (
+                "I kept retrieving the same data without making progress. "
+                "I don't have a reliable answer for that right now."
+            )
+
+        if tool_call.name == "web_fetch":
+            raw_fetch_url = str(tool_call.args.get("url", "")).strip()
+            fetch_url = self._canonical_web_url(raw_fetch_url)
+            if fetch_url and fetch_url in state.fetched_urls:
+                shown_url = raw_fetch_url or fetch_url
+                self._append_history(
+                    state.history,
+                    raw,
+                    "web_fetch",
+                    f"Already fetched {shown_url} earlier in this request. Use the previous result.",
+                )
+                return None
+            if state.fetch_count >= 2:
+                self._append_history(
+                    state.history,
+                    raw,
+                    "web_fetch",
+                    "Fetch limit reached (2 URLs). Synthesize a final answer now using the data already fetched.",
+                )
+                return None
+            if fetch_url:
+                state.fetched_urls.add(fetch_url)
+            state.fetch_count += 1
+
+        result = self._registry.execute(tool_call)
+        state.tool_calls += 1
+        state.tools_used.add(result.tool_name)
+        if result.tool_name in {"web_search", "web_fetch"}:
+            self._record_web_result(state=state, result=result)
+        logger.debug("Tool result (error=%s): %s", result.is_error, result.content[:200])
+        self._append_history(state.history, raw, result.tool_name, result.content)
+        return None
+
+    def _handle_plain_response(self, *, raw: str, task: str, state: _LoopRunState) -> str | None:
+        plain = self._sanitize_user_answer_text(raw)
+        if not plain:
+            self._append_history(
+                state.history,
+                raw,
+                "format_guard",
+                (
+                    "Malformed output. Next step must be either a valid tool call "
+                    "or a JSON answer object with no internal tags."
+                ),
+            )
+            return None
+        if self._is_live_web_task(task) and state.web_attempts > 0 and state.web_successes == 0:
+            return self._live_web_unverified_message(state.checked_urls)
+        return self._answer_with_guards(
+            task=task,
+            answer_text=plain.strip(),
+            tools_used=state.tools_used,
+            web_successes=state.web_successes,
+            source_urls=state.source_urls,
+        )
+
     def _forced_finalize_answer(
         self,
         *,
@@ -356,13 +570,7 @@ class AgentLoop:
     ) -> str:
         """Run one last no-tools generation pass to avoid step-limit dead-ends."""
         if self._is_live_web_task(task) and web_attempts > 0 and web_successes == 0:
-            fallback = (
-                "I couldn't verify reliable live updates because the available sources were "
-                "blocked or returned unusable pages."
-            )
-            if checked_urls:
-                fallback += f" Sources checked: {', '.join(checked_urls[:3])}."
-            return fallback
+            return self._live_web_unverified_message(checked_urls)
 
         system = (
             f"You are {self._settings.assistant_name}. Return the final user-facing answer now.\n"
@@ -395,11 +603,13 @@ class AgentLoop:
                 return f"{base} Sources checked: {', '.join(checked_urls[:3])}."
             return f"{base} Please try narrowing the request."
 
-        answer = guard_answer_truthfulness(text, tools_used)
-        answer = guard_temporal_uncertainty(task, answer)
-        if web_successes > 0:
-            answer = self._append_sources_if_missing(answer, source_urls)
-        return answer
+        return self._answer_with_guards(
+            task=task,
+            answer_text=text,
+            tools_used=tools_used,
+            web_successes=web_successes,
+            source_urls=source_urls,
+        )
 
     # ------------------------------------------------------------------
     # Main loop
@@ -431,32 +641,19 @@ class AgentLoop:
 
         started_at = time.perf_counter()
         system = self._system_prompt(entity_context=context, max_steps=max_steps)
-        # history grows as (assistant_output, observation) pairs each step
-        history: list[tuple[str, str]] = []
-        # Track (tool_name, canonical_args) call counts to detect infinite loops
-        tool_call_counts: Counter[tuple[str, str]] = Counter()
-        # Track which tool names were actually invoked (for truthfulness guard)
-        tools_used: set[str] = set()
-        fetched_urls: set[str] = set()
-        fetch_count = 0
-        tool_calls = 0
-        total_prompt_chars = 0
-        web_attempts = 0
-        web_successes = 0
-        checked_urls: list[str] = []
-        source_urls: list[str] = []
+        state = _LoopRunState()
 
         for step_num in range(max_steps):
             logger.debug("AgentLoop step %d/%d", step_num + 1, max_steps)
-            prompt = self._build_prompt(system, task, history)
-            total_prompt_chars += len(prompt)
+            prompt = self._build_prompt(system, task, state.history)
+            state.total_prompt_chars += len(prompt)
             logger.debug(
                 "AgentLoop metrics step=%d prompt_chars=%d history_chars=%d tool_calls=%d web_fetches=%d",
                 step_num + 1,
                 len(prompt),
-                self._history_chars(history),
-                tool_calls,
-                fetch_count,
+                self._history_chars(state.history),
+                state.tool_calls,
+                state.fetch_count,
             )
             raw = self._generate(prompt)
             parsed = parse_step(raw)
@@ -466,161 +663,61 @@ class AgentLoop:
 
             # --- Final answer: yield and exit ---
             if parsed.answer is not None:
-                if self._is_live_web_task(task) and web_attempts > 0 and web_successes == 0:
-                    fallback = (
-                        "I couldn't verify reliable live updates because the available sources were "
-                        "blocked or returned unusable pages."
-                    )
-                    if checked_urls:
-                        fallback += f" Sources checked: {', '.join(checked_urls[:3])}."
-                    yield fallback
-                    return
-                answer_text = self._sanitize_user_answer_text(parsed.answer)
-                if not answer_text:
-                    self._append_history(
-                        history,
-                        raw,
-                        "format_guard",
-                        "Invalid final answer format. Return a JSON answer object with user-facing content only.",
-                    )
+                answer = self._handle_parsed_answer(
+                    parsed_answer=parsed.answer,
+                    raw=raw,
+                    task=task,
+                    state=state,
+                )
+                if answer is None:
                     continue
-                answer = guard_answer_truthfulness(answer_text, tools_used)
-                answer = guard_temporal_uncertainty(task, answer)
-                if web_successes > 0:
-                    answer = self._append_sources_if_missing(answer, source_urls)
                 logger.debug(
                     "AgentLoop completed in %.0fms (steps=%d tool_calls=%d web_fetches=%d total_prompt_chars=%d)",
                     (time.perf_counter() - started_at) * 1000,
                     step_num + 1,
-                    tool_calls,
-                    fetch_count,
-                    total_prompt_chars,
+                    state.tool_calls,
+                    state.fetch_count,
+                    state.total_prompt_chars,
                 )
                 yield answer
                 return
 
             # --- Tool call: execute, record observation, loop again ---
             if parsed.tool_call is not None:
-                logger.debug(
-                    "Tool call: %s(%s)", parsed.tool_call.name, parsed.tool_call.args
-                )
-                # Detect repeated identical calls to break infinite fetch loops.
-                call_key = (
-                    parsed.tool_call.name,
-                    json.dumps(parsed.tool_call.args, sort_keys=True),
-                )
-                tool_call_counts[call_key] += 1
-                if tool_call_counts[call_key] >= 3:
-                    logger.warning(
-                        "Repeated tool call detected (%s x3) — forcing answer", call_key[0]
-                    )
-                    logger.debug(
-                        "AgentLoop bailed after repeated calls (tool_calls=%d total_prompt_chars=%d)",
-                        tool_calls,
-                        total_prompt_chars,
-                    )
-                    yield (
-                        "I kept retrieving the same data without making progress. "
-                        "I don't have a reliable answer for that right now."
-                    )
+                bail = self._handle_tool_call(tool_call=parsed.tool_call, raw=raw, state=state)
+                if bail is not None:
+                    yield bail
                     return
-
-                if parsed.tool_call.name == "web_fetch":
-                    fetch_url = str(parsed.tool_call.args.get("url", "")).strip()
-                    if fetch_url and fetch_url in fetched_urls:
-                        self._append_history(
-                            history,
-                            raw,
-                            "web_fetch",
-                            f"Already fetched {fetch_url} earlier in this request. Use the previous result.",
-                        )
-                        continue
-                    if fetch_count >= 2:
-                        self._append_history(
-                            history,
-                            raw,
-                            "web_fetch",
-                            "Fetch limit reached (2 URLs). Synthesize a final answer now using the data already fetched.",
-                        )
-                        continue
-                    if fetch_url:
-                        fetched_urls.add(fetch_url)
-                    fetch_count += 1
-
-                result = self._registry.execute(parsed.tool_call)
-                tool_calls += 1
-                tools_used.add(result.tool_name)
-                if result.tool_name in {"web_search", "web_fetch"}:
-                    web_attempts += 1
-                    urls = []
-                    if result.outcome is not None and result.outcome.sources:
-                        urls = list(result.outcome.sources)
-                    if not urls:
-                        urls = self._extract_urls(result.content)
-                    for url in urls:
-                        if url not in checked_urls:
-                            checked_urls.append(url)
-                    if not result.is_error and urls:
-                        web_successes += 1
-                        for url in urls:
-                            if url not in source_urls:
-                                source_urls.append(url)
-                logger.debug(
-                    "Tool result (error=%s): %s", result.is_error, result.content[:200]
-                )
-                self._append_history(history, raw, result.tool_name, result.content)
                 continue
 
             # --- No XML tags: treat raw text as a plain answer ---
             # Some model responses (especially for simple tasks) skip the
             # XML format entirely.  Accept them rather than forcing a retry.
             if raw.strip():
-                plain = self._sanitize_user_answer_text(raw)
-                if not plain:
-                    self._append_history(
-                        history,
-                        raw,
-                        "format_guard",
-                        (
-                            "Malformed output. Next step must be either a valid tool call "
-                            "or a JSON answer object with no internal tags."
-                        ),
-                    )
+                answer = self._handle_plain_response(raw=raw, task=task, state=state)
+                if answer is None:
                     continue
-                if self._is_live_web_task(task) and web_attempts > 0 and web_successes == 0:
-                    fallback = (
-                        "I couldn't verify reliable live updates because the available sources were "
-                        "blocked or returned unusable pages."
-                    )
-                    if checked_urls:
-                        fallback += f" Sources checked: {', '.join(checked_urls[:3])}."
-                    yield fallback
-                    return
-                answer = guard_answer_truthfulness(plain.strip(), tools_used)
-                answer = guard_temporal_uncertainty(task, answer)
-                if web_successes > 0:
-                    answer = self._append_sources_if_missing(answer, source_urls)
                 logger.debug(
                     "AgentLoop plain-text completion in %.0fms (steps=%d tool_calls=%d total_prompt_chars=%d)",
                     (time.perf_counter() - started_at) * 1000,
                     step_num + 1,
-                    tool_calls,
-                    total_prompt_chars,
+                    state.tool_calls,
+                    state.total_prompt_chars,
                 )
                 yield answer
                 return
 
         # Exhausted all steps without a final answer: force one finalization pass.
-        if history:
+        if state.history:
             logger.debug("AgentLoop max-steps reached — attempting forced finalization")
             yield self._forced_finalize_answer(
                 task=task,
-                history=history,
-                tools_used=tools_used,
-                source_urls=source_urls,
-                checked_urls=checked_urls,
-                web_attempts=web_attempts,
-                web_successes=web_successes,
+                history=state.history,
+                tools_used=state.tools_used,
+                source_urls=state.source_urls,
+                checked_urls=state.checked_urls,
+                web_attempts=state.web_attempts,
+                web_successes=state.web_successes,
             )
             return
 
@@ -629,8 +726,8 @@ class AgentLoop:
             "AgentLoop hit max steps in %.0fms (max_steps=%d tool_calls=%d web_fetches=%d total_prompt_chars=%d)",
             (time.perf_counter() - started_at) * 1000,
             max_steps,
-            tool_calls,
-            fetch_count,
-            total_prompt_chars,
+            state.tool_calls,
+            state.fetch_count,
+            state.total_prompt_chars,
         )
         yield "I reached the step limit without a final answer. Please try rephrasing your request."

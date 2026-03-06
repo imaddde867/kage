@@ -173,6 +173,24 @@ class _ErrorWebFetchWithDocUrlTool(Tool):
         )
 
 
+class _CountingWebFetchTool(Tool):
+    name = "web_fetch"
+    description = "Tracks web fetch calls"
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {"url": {"type": "string"}},
+        "required": ["url"],
+    }
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def execute(self, *, url: str, **kwargs: Any) -> ToolResult:
+        _ = kwargs
+        self.calls.append(url)
+        return ToolResult(tool_name=self.name, content=f"URL: {url}\nFetched content.")
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -363,6 +381,18 @@ class TestAgentLoopToolUse(unittest.TestCase):
         result = "".join(loop.run("Compare A to B and cite sources"))
         self.assertIn("Sources: https://en.wikipedia.org/wiki/OpenClaw", result)
         self.assertNotIn("curl.se/libcurl/c/libcurl-errors.html", result)
+
+    def test_redundant_web_fetch_endpoint_is_skipped(self) -> None:
+        responses = [
+            '<tool>web_fetch</tool>\n<input>{"url":"https://example.com"}</input>',
+            '<tool>web_fetch</tool>\n<input>{"url":"https://EXAMPLE.com/#top"}</input>',
+            "<answer>All set.</answer>",
+        ]
+        fetch_tool = _CountingWebFetchTool()
+        loop = self._loop(responses, [fetch_tool])
+        result = "".join(loop.run("Fetch example once and summarize"))
+        self.assertIn("All set.", result)
+        self.assertEqual(len(fetch_tool.calls), 1)
 
 
 class TestAgentLoopHistoryStructure(unittest.TestCase):
