@@ -295,6 +295,14 @@ class WebFetchTool(Tool):
         WEB_FETCH_TLS_MODE=allow_insecure_fallback; the result is annotated.
         """
         del kwargs
+        if not isinstance(url, str):
+            return _tool_result(
+                tool_name=self.name,
+                content=f"Invalid URL type: {type(url).__name__}. Provide a full http/https URL string.",
+                is_error=True,
+                retryable=False,
+            )
+
         normalized_url = _normalize_url(url)
         parsed = urlparse(normalized_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
