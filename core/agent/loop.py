@@ -18,7 +18,8 @@ How one request flows through this module
                        loop back to step a.
         If neither  → yield raw text as a plain answer and return.
 
-4. If the loop exhausts max_steps, yield a graceful cap message.
+4. If the loop exhausts max_steps, attempt one forced finalization pass.
+   If that still fails, yield a graceful cap message.
 
 History / role alternation
 ---------------------------
@@ -90,6 +91,9 @@ Rules:
 - Keep answers concise and natural for speech
 - For online research, prefer web_search first, then web_fetch on relevant URLs
 - Do not fetch more than 2 URLs in one request
+- For comparison tasks, gather evidence for each side before concluding
+- For "my local machine" questions, use shell commands for system facts instead of guessing
+- For comparison/performance questions, do not finalize until you have at least one relevant tool result
 - When reporting web facts, always cite the source URL in your answer
 - Do not claim to have searched or fetched data unless a tool result supports it
 - If a tool fails, try an alternative or explain the limitation
@@ -103,11 +107,17 @@ Rules:
 _OBSERVATION_TEMPLATE = "[Tool result from {name}]:\n{content}"
 _ANSWER_PREFIX_RE = re.compile(r"^(final answer|answer|response)\s*[:\-]\s*", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://[^\s\])>]+", re.IGNORECASE)
+_URL_STRIP_CHARS = "\"'`<>{}[]().,;:!?"
 # Strips <thought>, <tool>, <input> blocks that leak into the fallback answer path.
 _INTERNAL_TAGS_RE = re.compile(
     r"<(?:thought|tool|input)>.*?</(?:thought|tool|input)>\s*",
     re.DOTALL | re.IGNORECASE,
 )
+_DANGLING_INTERNAL_RE = re.compile(
+    r"<(?:thought|tool|input)\b[^>]*>.*$",
+    re.DOTALL | re.IGNORECASE,
+)
+_INTERNAL_TAG_TOKEN_RE = re.compile(r"</?(?:thought|tool|input)\b[^>]*>", re.IGNORECASE)
 
 
 class AgentLoop:
@@ -278,7 +288,42 @@ class AgentLoop:
             history.pop(0)
 
     def _extract_urls(self, text: str) -> list[str]:
-        return _URL_RE.findall(text)
+        urls: list[str] = []
+        seen: set[str] = set()
+
+        def _add(candidate: str) -> None:
+            cleaned = candidate.strip().strip(_URL_STRIP_CHARS)
+            if not cleaned.lower().startswith(("http://", "https://")):
+                return
+            if cleaned in seen:
+                return
+            seen.add(cleaned)
+            urls.append(cleaned)
+
+        stripped = text.strip()
+        if stripped and stripped[0] in {"{", "["}:
+            try:
+                payload = json.loads(stripped)
+                if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                    for item in payload["results"]:
+                        if not isinstance(item, dict):
+                            continue
+                        url = str(item.get("url", "")).strip()
+                        if url:
+                            _add(url)
+            except Exception:
+                pass
+
+        first_line = stripped.splitlines()[0].strip() if stripped else ""
+        if first_line.lower().startswith("url:"):
+            token = first_line[4:].strip().split(" ", 1)[0]
+            if token:
+                _add(token)
+
+        for match in _URL_RE.findall(text):
+            _add(match)
+
+        return urls
 
     def _is_live_web_task(self, task: str) -> bool:
         return DEFAULT_SIGNALS.has(task, "live_web")
@@ -290,6 +335,71 @@ class AgentLoop:
             return answer
         joined = ", ".join(source_urls[:3])
         return f"{answer.rstrip()}\n\nSources: {joined}"
+
+    def _sanitize_user_answer_text(self, text: str) -> str:
+        cleaned = _INTERNAL_TAGS_RE.sub("", text or "")
+        cleaned = _DANGLING_INTERNAL_RE.sub("", cleaned)
+        cleaned = _INTERNAL_TAG_TOKEN_RE.sub("", cleaned)
+        cleaned = _ANSWER_PREFIX_RE.sub("", cleaned.strip())
+        return cleaned.strip()
+
+    def _forced_finalize_answer(
+        self,
+        *,
+        task: str,
+        history: list[tuple[str, str]],
+        tools_used: set[str],
+        source_urls: list[str],
+        checked_urls: list[str],
+        web_attempts: int,
+        web_successes: int,
+    ) -> str:
+        """Run one last no-tools generation pass to avoid step-limit dead-ends."""
+        if self._is_live_web_task(task) and web_attempts > 0 and web_successes == 0:
+            fallback = (
+                "I couldn't verify reliable live updates because the available sources were "
+                "blocked or returned unusable pages."
+            )
+            if checked_urls:
+                fallback += f" Sources checked: {', '.join(checked_urls[:3])}."
+            return fallback
+
+        system = (
+            f"You are {self._settings.assistant_name}. Return the final user-facing answer now.\n"
+            "Do not call tools. Do not output <thought>, <tool>, or <input> tags.\n"
+            "Use only the user request and prior tool results in this conversation.\n"
+            "If evidence is limited, state the limitation briefly and answer with best supported guidance."
+        )
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": task},
+        ]
+        for assistant_output, observation in history:
+            messages.append({"role": "assistant", "content": assistant_output})
+            messages.append({"role": "user", "content": observation})
+        messages.append(
+            {
+                "role": "user",
+                "content": "Provide the final answer now. No tool calls.",
+            }
+        )
+
+        prompt = apply_chat_template(self._tokenizer, messages)
+        raw = self._generate(prompt)
+        parsed = parse_step(raw)
+        candidate = parsed.answer if parsed.answer is not None else raw
+        text = self._sanitize_user_answer_text(candidate)
+        if not text:
+            base = "I couldn't produce a final answer within the step budget."
+            if checked_urls:
+                return f"{base} Sources checked: {', '.join(checked_urls[:3])}."
+            return f"{base} Please try narrowing the request."
+
+        answer = guard_answer_truthfulness(text, tools_used)
+        answer = guard_temporal_uncertainty(task, answer)
+        if web_successes > 0:
+            answer = self._append_sources_if_missing(answer, source_urls)
+        return answer
 
     # ------------------------------------------------------------------
     # Main loop
@@ -333,6 +443,7 @@ class AgentLoop:
         total_prompt_chars = 0
         web_attempts = 0
         web_successes = 0
+        checked_urls: list[str] = []
         source_urls: list[str] = []
 
         for step_num in range(max_steps):
@@ -360,11 +471,20 @@ class AgentLoop:
                         "I couldn't verify reliable live updates because the available sources were "
                         "blocked or returned unusable pages."
                     )
-                    if source_urls:
-                        fallback += f" Sources checked: {', '.join(source_urls[:3])}."
+                    if checked_urls:
+                        fallback += f" Sources checked: {', '.join(checked_urls[:3])}."
                     yield fallback
                     return
-                answer = guard_answer_truthfulness(parsed.answer, tools_used)
+                answer_text = self._sanitize_user_answer_text(parsed.answer)
+                if not answer_text:
+                    self._append_history(
+                        history,
+                        raw,
+                        "format_guard",
+                        "Invalid final answer format. Return <answer> with user-facing content only.",
+                    )
+                    continue
+                answer = guard_answer_truthfulness(answer_text, tools_used)
                 answer = guard_temporal_uncertainty(task, answer)
                 if web_successes > 0:
                     answer = self._append_sources_if_missing(answer, source_urls)
@@ -434,10 +554,13 @@ class AgentLoop:
                     web_attempts += 1
                     urls = self._extract_urls(result.content)
                     for url in urls:
-                        if url not in source_urls:
-                            source_urls.append(url)
+                        if url not in checked_urls:
+                            checked_urls.append(url)
                     if not result.is_error and urls:
                         web_successes += 1
+                        for url in urls:
+                            if url not in source_urls:
+                                source_urls.append(url)
                 logger.debug(
                     "Tool result (error=%s): %s", result.is_error, result.content[:200]
                 )
@@ -448,14 +571,25 @@ class AgentLoop:
             # Some model responses (especially for simple tasks) skip the
             # XML format entirely.  Accept them rather than forcing a retry.
             if raw.strip():
-                plain = _ANSWER_PREFIX_RE.sub("", _INTERNAL_TAGS_RE.sub("", raw).strip())
+                plain = self._sanitize_user_answer_text(raw)
+                if not plain:
+                    self._append_history(
+                        history,
+                        raw,
+                        "format_guard",
+                        (
+                            "Malformed output. Next step must be either a valid tool call "
+                            "or <answer>...</answer> with no internal tags."
+                        ),
+                    )
+                    continue
                 if self._is_live_web_task(task) and web_attempts > 0 and web_successes == 0:
                     fallback = (
                         "I couldn't verify reliable live updates because the available sources were "
                         "blocked or returned unusable pages."
                     )
-                    if source_urls:
-                        fallback += f" Sources checked: {', '.join(source_urls[:3])}."
+                    if checked_urls:
+                        fallback += f" Sources checked: {', '.join(checked_urls[:3])}."
                     yield fallback
                     return
                 answer = guard_answer_truthfulness(plain.strip(), tools_used)
@@ -472,7 +606,21 @@ class AgentLoop:
                 yield answer
                 return
 
-        # Exhausted all steps without a final answer.
+        # Exhausted all steps without a final answer: force one finalization pass.
+        if history:
+            logger.debug("AgentLoop max-steps reached — attempting forced finalization")
+            yield self._forced_finalize_answer(
+                task=task,
+                history=history,
+                tools_used=tools_used,
+                source_urls=source_urls,
+                checked_urls=checked_urls,
+                web_attempts=web_attempts,
+                web_successes=web_successes,
+            )
+            return
+
+        # No history at all (e.g. empty model outputs each step): graceful cap.
         logger.debug(
             "AgentLoop hit max steps in %.0fms (max_steps=%d tool_calls=%d web_fetches=%d total_prompt_chars=%d)",
             (time.perf_counter() - started_at) * 1000,

@@ -10,12 +10,22 @@ _BACKEND_MLX = "mlx"
 _BACKEND_MLX_VLM = "mlx_vlm"
 
 
+def _is_vlm_checkpoint_mismatch(exc: Exception) -> bool:
+    """Detect common MLX-LM load failures caused by VLM checkpoints."""
+    message = str(exc).lower()
+    if "vision_tower" in message:
+        return True
+    return "parameters not in model" in message and "language_model." in message
+
+
 class GenerationRuntime:
     def __init__(self, *, settings: config.Settings) -> None:
         self.settings = settings
         self.backend = self.settings.llm_backend.strip().lower()
         self.last_stats: dict[str, Any] = {}
         self.tokenizer: Any | None = None
+        self._mlx_temperature_arg: str | None = None
+        self._mlx_make_sampler: Any | None = None
 
         if self.backend == _BACKEND_MLX_VLM:
             self._init_mlx_vlm()
@@ -61,11 +71,25 @@ class GenerationRuntime:
 
     def _init_mlx(self) -> None:
         from mlx_lm import load, stream_generate  # type: ignore[import]
+        try:
+            from mlx_lm.sample_utils import make_sampler  # type: ignore[import]
+        except Exception:
+            make_sampler = None
 
         print(f"  Loading {self.settings.mlx_model}…", flush=True)
-        model, tokenizer = load(self.settings.mlx_model)
+        try:
+            model, tokenizer = load(self.settings.mlx_model)
+        except ValueError as exc:
+            if _is_vlm_checkpoint_mismatch(exc):
+                raise ValueError(
+                    f"Model '{self.settings.mlx_model}' appears to be a VLM checkpoint "
+                    "but LLM_BACKEND=mlx uses mlx_lm (text-only). "
+                    "Set LLM_BACKEND=mlx_vlm for this model, or choose a text-only model for mlx."
+                ) from exc
+            raise
         self._mlx_model = model
         self._mlx_stream = stream_generate
+        self._mlx_make_sampler = make_sampler
 
         self._mlx_draft_model = None
         if self.settings.mlx_draft_model:
@@ -80,6 +104,61 @@ class GenerationRuntime:
         for _ in self.stream_raw(prompt, max_tokens=max_tokens):
             pass
         print("  Ready.\n", flush=True)
+
+    def _iter_mlx_stream(self, *, prompt: str, max_tokens: int, temperature: float) -> Iterator[Any]:
+        """Yield chunks from mlx_lm stream_generate across API variants."""
+        preferred_args: list[str] = []
+        if self._mlx_temperature_arg in {"sampler", "temperature", "temp"}:
+            preferred_args.append(self._mlx_temperature_arg)
+        for candidate in ("sampler", "temperature", "temp"):
+            if candidate not in preferred_args:
+                preferred_args.append(candidate)
+
+        last_kw_error: TypeError | None = None
+        base_kwargs = {
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "draft_model": self._mlx_draft_model,
+        }
+        sampler = None
+        if callable(self._mlx_make_sampler):
+            sampler = self._mlx_make_sampler(temperature)
+
+        for temp_arg in preferred_args:
+            kwargs = dict(base_kwargs)
+            if temp_arg == "sampler":
+                if sampler is None:
+                    continue
+                kwargs[temp_arg] = sampler
+            else:
+                kwargs[temp_arg] = temperature
+            try:
+                gen_iter = iter(
+                    self._mlx_stream(
+                        self._mlx_model,
+                        self.tokenizer,
+                        **kwargs,
+                    )
+                )
+                first = next(gen_iter)
+            except StopIteration:
+                self._mlx_temperature_arg = temp_arg
+                return
+            except TypeError as exc:
+                message = str(exc)
+                if "unexpected keyword argument" in message and f"'{temp_arg}'" in message:
+                    last_kw_error = exc
+                    continue
+                raise
+
+            self._mlx_temperature_arg = temp_arg
+            yield first
+            yield from gen_iter
+            return
+
+        if last_kw_error is not None:
+            raise last_kw_error
+        raise RuntimeError("Unable to initialize MLX stream generation.")
 
     def stream_raw(
         self,
@@ -99,17 +178,15 @@ class GenerationRuntime:
                     prompt=prompt,
                     max_tokens=tokens,
                     temperature=temp,
+                    prefill_step_size=None,
                 )
             )
         elif self.backend == _BACKEND_MLX:
             gen_iter = iter(
-                self._mlx_stream(
-                    self._mlx_model,
-                    self.tokenizer,
+                self._iter_mlx_stream(
                     prompt=prompt,
                     max_tokens=tokens,
-                    draft_model=self._mlx_draft_model,
-                    temp=temp,
+                    temperature=temp,
                 )
             )
         else:
@@ -140,4 +217,3 @@ class GenerationRuntime:
                         "tok_per_sec": total_tokens / pure_gen_s if pure_gen_s > 0 else 0.0,
                     }
                 )
-

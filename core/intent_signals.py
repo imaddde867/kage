@@ -71,6 +71,17 @@ _DEFAULT_RULES: tuple[SignalRule, ...] = (
     SignalRule("needs_tools", r"\b(search|look up|fetch|online|web)\b", 1.0),
     SignalRule("needs_tools", r"\b(calendar|appointment|schedule|dentist|meeting)\b", 1.0),
     SignalRule("needs_tools", r"\b(latest|recent updates?|current|today'?s?|right now|breaking news|live)\b", 1.0),
+    SignalRule(
+        "needs_tools",
+        r"\b(compare|comparison|vs\.?|versus|better|faster)\b.*\b(specs?|performance|benchmark|model|macbook|laptop|machine|computer|local)\b",
+        1.0,
+    ),
+    SignalRule(
+        "needs_tools",
+        r"\b(macbook|laptop|machine|computer|local)\b.*\b(compare|comparison|vs\.?|versus|better|faster)\b",
+        1.0,
+    ),
+    SignalRule("needs_tools", r"\b(my local (mac|machine|computer)|this (mac|machine|computer)|system specs?|hardware specs?)\b", 1.0),
 )
 
 

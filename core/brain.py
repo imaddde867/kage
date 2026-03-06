@@ -277,10 +277,15 @@ class BrainService:
             logger.exception("Failed to persist exchange")
             exchange_id = None
 
+        should_extract = True
+        if route is not None and hasattr(route, "should_extract"):
+            should_extract = bool(route.should_extract)
+
         if (
             exchange_id is not None
             and getattr(self.settings, "extraction_enabled", True)
             and hasattr(self, "_entity_store")
+            and should_extract
         ):
             self._extract_and_store(user_input, exchange_id)
 
@@ -298,6 +303,7 @@ class BrainService:
             "  - Calendar or reminder operations\n"
             "  - Shell commands or system information\n"
             "  - Memory write operations (storing facts or tasks)\n"
+            "  - Product/spec comparisons that need current web data or local machine inspection\n"
             "  - Time-sensitive facts, current events, prices, or live data\n\n"
             "Output 'no' only for simple conversational questions answerable from knowledge alone.\n\n"
             "Examples:\n"
@@ -307,7 +313,8 @@ class BrainService:
             "  'What events do I have today?' → yes\n"
             "  'Who wrote Hamlet?' → no\n"
             "  'Run ls in my home folder' → yes\n"
-            "  'What is the weather right now?' → yes"
+            "  'What is the weather right now?' → yes\n"
+            "  'Compare the new MacBook Neo to my local machine' → yes"
         )
         messages = [
             {"role": "system", "content": system},

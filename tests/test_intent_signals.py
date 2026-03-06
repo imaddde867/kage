@@ -25,6 +25,10 @@ class TestIntentSignals(unittest.TestCase):
     def test_default_live_web(self) -> None:
         self.assertTrue(DEFAULT_SIGNALS.has("Any latest updates right now?", "live_web"))
 
+    def test_default_hardware_compare_needs_tools(self) -> None:
+        text = "Is the new MacBook Neo or my local machine better?"
+        self.assertTrue(DEFAULT_SIGNALS.has(text, "needs_tools"))
+
     def test_weighted_score_supports_mixed_intents(self) -> None:
         score = DEFAULT_SIGNALS.weighted_score(
             "what connectors can you use right now",
