@@ -79,10 +79,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def normalize_legacy_argv(argv: Sequence[str]) -> list[str]:
     args = list(argv)
+    if not args:
+        return ["voice"]
     if "--bench" in args:
         return ["bench", *[arg for arg in args if arg != "--bench"]]
     if "--text" in args:
         return ["chat", *[arg for arg in args if arg != "--text"]]
+    if args[0].startswith("-"):
+        # Preserve global argparse behavior for flags like --help.
+        return args
     if args and args[0] in {"chat", "voice", "bench", "doctor"}:
         return args
     return ["voice", *args]

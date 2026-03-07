@@ -189,6 +189,21 @@ class TestToolRegistry(unittest.TestCase):
         result = self.registry.execute(ToolCall(name="echo", args={}))
         self.assertEqual(result.content, "v2")
 
+    def test_tool_start_callback_runs_only_after_validation(self) -> None:
+        starts: list[tuple[str, dict[str, Any]]] = []
+        registry = ToolRegistry(on_tool_start=lambda name, args: starts.append((name, dict(args))))
+        registry.register(_WebFetchDouble())
+
+        # Missing required "url" should fail validation and skip on_tool_start.
+        failed = registry.execute(ToolCall(name="web_fetch", args={}))
+        self.assertTrue(failed.is_error)
+        self.assertEqual(starts, [])
+
+        ok = registry.execute(ToolCall(name="web_fetch", args={"url": "https://example.com"}))
+        self.assertFalse(ok.is_error)
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0][0], "web_fetch")
+
 
 if __name__ == "__main__":
     unittest.main()
