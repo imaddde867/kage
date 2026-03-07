@@ -376,7 +376,9 @@ class AgentLoop:
         try:
             port = parsed.port
         except ValueError:
-            port = None
+            # Keep malformed netlocs (for example non-numeric ports) distinct so
+            # they do not collapse onto a valid URL key.
+            return candidate
         default_port = (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
         netloc = host if port is None or default_port else f"{host}:{port}"
         path = parsed.path or "/"

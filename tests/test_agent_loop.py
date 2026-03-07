@@ -394,6 +394,18 @@ class TestAgentLoopToolUse(unittest.TestCase):
         self.assertIn("All set.", result)
         self.assertEqual(len(fetch_tool.calls), 1)
 
+    def test_malformed_port_url_does_not_collapse_to_valid_endpoint(self) -> None:
+        responses = [
+            '<tool>web_fetch</tool>\n<input>{"url":"https://example.com:abc"}</input>',
+            '<tool>web_fetch</tool>\n<input>{"url":"https://example.com"}</input>',
+            "<answer>All set.</answer>",
+        ]
+        fetch_tool = _CountingWebFetchTool()
+        loop = self._loop(responses, [fetch_tool])
+        result = "".join(loop.run("Retry fetch with a corrected URL"))
+        self.assertIn("All set.", result)
+        self.assertEqual(fetch_tool.calls, ["https://example.com:abc", "https://example.com"])
+
 
 class TestAgentLoopHistoryStructure(unittest.TestCase):
     """Verify that the prompt builder receives correct role alternation.
