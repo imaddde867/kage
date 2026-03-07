@@ -260,6 +260,14 @@ class TestWebSearchTool(unittest.TestCase):
         mock_ddgs_cls.return_value.text.assert_not_called()
 
     @patch("connectors.web_search._DDGS")
+    def test_non_string_query_returns_input_error(self, mock_ddgs_cls: MagicMock) -> None:
+        result = self.tool.execute(query=None)  # type: ignore[arg-type]
+        self.assertTrue(result.is_error)
+        self.assertIn("invalid search query", result.content.lower())
+        self.assertFalse(result.outcome.retryable)
+        mock_ddgs_cls.return_value.text.assert_not_called()
+
+    @patch("connectors.web_search._DDGS")
     def test_no_results(self, mock_ddgs_cls: MagicMock) -> None:
         """An empty result list returns an empty structured result payload."""
         mock_ddgs_cls.return_value.text.return_value = []

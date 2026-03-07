@@ -86,7 +86,9 @@ class WebSearchTool(Tool):
         )
 
     def _normalize_query(self, query: object) -> str:
-        text = str(query).strip()
+        if not isinstance(query, str):
+            return ""
+        text = query.strip()
         if not text:
             return ""
         condensed = " ".join(text.split())
