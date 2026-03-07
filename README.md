@@ -38,14 +38,19 @@ micromamba activate kage
 
 # 2) Install dependencies (includes connector deps)
 pip install -r requirements.txt
+pip install -e .
 
 # 3) Configure
 cp .env.example .env
 # Edit .env as needed
 
 # 4) Run
-python3 main.py --text   # text mode
-python3 main.py          # voice mode
+kage chat                # full-screen Textual chat UI
+kage chat --plain        # plain terminal fallback
+kage voice               # voice mode
+kage bench               # inference benchmark
+python3 main.py --text   # compatibility shim -> kage chat
+python3 main.py          # compatibility shim -> kage voice
 ```
 
 ## Connectors and Tools
@@ -173,9 +178,10 @@ Important:
 ## Architecture
 
 ```text
-main.py
-├── voice mode: ListenerService -> BrainService -> speak()
-└── text mode:  input()         -> BrainService -> print/(optional speak)
+main.py -> core.cli
+├── chat:  SessionController -> Textual/plain shell -> BrainService
+├── voice: ListenerService -> BrainService -> speak()
+└── bench: benchmark runner -> BrainService
 
 BrainService request flow
 1) guardrails state update
@@ -198,6 +204,10 @@ Voice mode only
 Key modules:
 
 - `core/brain.py`: compatibility facade over `RequestOrchestrator`
+- `core/session.py`: typed session-event bridge between `BrainService` and terminal UIs
+- `core/textual_chat.py`: full-screen Textual chat application
+- `core/chat_shell.py`: plain terminal fallback built on `SessionController`
+- `core/cli.py`: public CLI entrypoint with `chat`, `voice`, `bench`, and `doctor`
 - `core/platform/orchestrator.py`: agent-core request orchestration
 - `core/platform/execution_planner.py`: unified strategy planner (direct/retrieval/tool/mixed)
 - `core/platform/context_planner.py`: context source and budget planning

@@ -33,6 +33,7 @@ from core.platform import (
     RequestOrchestrator,
 )
 from core.platform.storage import EvidenceStore, TraceStore
+from core.runtime_events import RuntimeObserver, StatusUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ class BrainService:
         self._context_planner = ContextPlanner()
         self._proactive_policy = ProactivePolicyEngine()
         self._active_context_plan = None
+        self._observers: list[RuntimeObserver] = []
         self._orchestrator = RequestOrchestrator(
             settings=self.settings,
             execution_planner=self._execution_planner,
@@ -161,6 +163,8 @@ class BrainService:
         registry = ToolRegistry(
             trace_store=self._trace_store,
             evidence_store=self._evidence_store,
+            on_tool_start=self._handle_tool_started,
+            on_tool_finish=self._handle_tool_finished,
         )
 
         # --- Core connectors (always available) ---
@@ -206,6 +210,68 @@ class BrainService:
             assistant_name=assistant_name,
             text_mode=text_mode,
         )
+
+    def add_observer(self, observer: RuntimeObserver) -> None:
+        if observer in self._observers:
+            return
+        self._observers.append(observer)
+
+    def remove_observer(self, observer: RuntimeObserver) -> None:
+        self._observers = [candidate for candidate in self._observers if candidate is not observer]
+
+    def _notify_status(self, status: str, *, detail: str = "", metadata: dict[str, Any] | None = None) -> None:
+        update = StatusUpdate(status=status, detail=detail, metadata=metadata or {})
+        for observer in list(self._observers):
+            callback = getattr(observer, "on_status_changed", None)
+            if callable(callback):
+                try:
+                    callback(update)
+                except Exception:
+                    logger.debug("Status observer callback failed")
+
+    def _notify_error(
+        self,
+        message: str,
+        *,
+        recoverable: bool = True,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        for observer in list(self._observers):
+            callback = getattr(observer, "on_error", None)
+            if callable(callback):
+                try:
+                    callback(message, recoverable=recoverable, metadata=metadata or {})
+                except Exception:
+                    logger.debug("Error observer callback failed")
+
+    def _handle_tool_started(self, tool_name: str, args: dict[str, Any]) -> None:
+        self._notify_status("checking_tools", detail=f"Running {tool_name}")
+        for observer in list(self._observers):
+            callback = getattr(observer, "on_tool_started", None)
+            if callable(callback):
+                try:
+                    callback(tool_name, args)
+                except Exception:
+                    logger.debug("Tool start observer callback failed")
+
+    def _handle_tool_finished(self, result: Any) -> None:
+        for observer in list(self._observers):
+            callback = getattr(observer, "on_tool_finished", None)
+            if callable(callback):
+                try:
+                    callback(result)
+                except Exception:
+                    logger.debug("Tool finish observer callback failed")
+
+        outcome = getattr(result, "outcome", None)
+        for source in list(getattr(outcome, "sources", []) or []):
+            for observer in list(self._observers):
+                callback = getattr(observer, "on_source_added", None)
+                if callable(callback):
+                    try:
+                        callback(source, tool_name=result.tool_name)
+                    except Exception:
+                        logger.debug("Source observer callback failed")
 
     def _collect_recent_turns(self) -> list[tuple[str, str]]:
         return collect_recent_turns(
@@ -541,6 +607,7 @@ class BrainService:
         """
         assert self._agent_loop is not None
         self._update_policy_state(user_input)
+        self._notify_status("checking_tools", detail="Running agent workflow")
         entity_context = self._agent_entity_context(user_input)
         topic_hint = derive_topic_hint(self._collect_recent_turns())
         if topic_hint:
@@ -577,6 +644,9 @@ class BrainService:
 
     def classify_ambiguous_tool_need(self, user_input: str) -> bool:
         return self._classify_ambiguous_tool_need(user_input)
+
+    def report_status(self, status: str, *, detail: str = "", metadata: dict[str, Any] | None = None) -> None:
+        self._notify_status(status, detail=detail, metadata=metadata)
 
     def record_decision_trace(self, decision: Any, context_plan: Any) -> None:
         trace = getattr(self, "_trace_store", None)
@@ -617,6 +687,7 @@ class BrainService:
     def agent_runner(self, task: str, entity_context: str) -> Iterator[str]:
         assert self._agent_loop is not None
         self._update_policy_state(task)
+        self._notify_status("checking_tools", detail="Executing tool plan")
         yield from self._agent_loop.run(task, context=entity_context)
 
     def persist_exchange(self, user_input: str, reply: str) -> None:
@@ -626,17 +697,20 @@ class BrainService:
         self._active_context_plan = context_plan
         try:
             self._update_policy_state(user_input)
+            self._notify_status("drafting_answer", detail="Preparing response")
             deterministic = self._deterministic_response(user_input)
             if deterministic:
                 reply = deterministic.strip()
                 if reply:
                     yield reply
                     self._persist_exchange(user_input, reply)
+                    self._notify_status("done", detail="Reply complete")
                 return
 
             route = self._router.classify(user_input) if hasattr(self, "_router") else None
             parts: list[str] = []
             if text_mode:
+                self._notify_status("drafting_answer", detail="Streaming response")
                 for chunk in self._stream_text(user_input, route=route):
                     parts.append(chunk)
                     yield chunk
@@ -648,6 +722,7 @@ class BrainService:
                 reply = " ".join(parts).strip()
 
             self._persist_exchange(user_input, reply, route=route)
+            self._notify_status("done", detail="Reply complete")
             if route is not None and route.proactive_ok and hasattr(self, "_entity_store"):
                 suggestion = self._proactive_policy.suggest_from_reply(
                     entity_store=self._entity_store,
@@ -657,6 +732,9 @@ class BrainService:
                 )
                 if suggestion:
                     yield suggestion
+        except Exception as exc:
+            self._notify_error(str(exc), recoverable=False)
+            raise
         finally:
             self._active_context_plan = None
 
