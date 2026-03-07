@@ -31,6 +31,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         voice.assert_called_once()
 
+    def test_global_help_is_not_rewritten_to_voice(self) -> None:
+        self.assertEqual(core.cli.normalize_legacy_argv(["--help"]), ["--help"])
+
     def test_bench_dispatch(self) -> None:
         with patch("core.cli.config.get", return_value=_SETTINGS), patch("core.cli.launch_bench") as bench:
             rc = core.cli.main(["bench"])

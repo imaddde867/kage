@@ -126,6 +126,18 @@ class SessionControllerTests(unittest.TestCase):
         self.assertIn("boom", errors[-1].text)
         self.assertTrue(any(event.data.get("status") == "error" for event in statuses))
 
+    def test_reset_clears_stale_events(self) -> None:
+        controller = SessionController(brain=_FakeBrain())
+        self._collect_events(controller)
+
+        controller.submit("find something")
+        self.assertTrue(controller.wait_until_idle(1.0))
+
+        # Intentionally do not drain queue before reset.
+        controller.reset()
+        events = self._collect_events(controller)
+        self.assertEqual([event.kind for event in events], ["session_started"])
+
 
 if __name__ == "__main__":
     unittest.main()

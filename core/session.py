@@ -67,6 +67,7 @@ class SessionController:
     def reset(self) -> None:
         if self.is_busy:
             raise RuntimeError("Cannot reset while a request is running.")
+        self._drain_pending_events()
         self._session_id = self._new_session_id()
         self._turn_id = 0
         self._last_answer = ""
@@ -139,7 +140,11 @@ class SessionController:
             yield event
 
     def close(self) -> None:
+        self.cancel()
+        self.wait_until_idle(timeout=1.0)
+        self._remove_observer()
         self._closed = True
+        self._drain_pending_events()
         self._queue.put(SessionEvent(kind=_SENTINEL_KIND, session_id=self._session_id))
 
     def recent_history(self, *, limit: int = 8) -> list[tuple[str, str]]:
@@ -305,6 +310,13 @@ class SessionController:
         remove = getattr(self._brain, "remove_observer", None)
         if callable(remove):
             remove(self)
+
+    def _drain_pending_events(self) -> None:
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                return
 
     def _emit_status(
         self,

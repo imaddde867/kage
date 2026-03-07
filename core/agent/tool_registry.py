@@ -205,11 +205,6 @@ class ToolRegistry:
             )
 
         repaired_args = self._repair_args(tool_name, call.args)
-        if callable(self._on_tool_start):
-            try:
-                self._on_tool_start(tool_name, dict(repaired_args))
-            except Exception:
-                logger.debug("Tool start callback failed for '%s'", tool_name)
         validation_error = self._validate_args(tool, repaired_args)
         if validation_error:
             return self._finalize(
@@ -217,6 +212,11 @@ class ToolRegistry:
                 query_text=str(repaired_args),
                 started=started,
             )
+        if callable(self._on_tool_start):
+            try:
+                self._on_tool_start(tool_name, dict(repaired_args))
+            except Exception:
+                logger.debug("Tool start callback failed for '%s'", tool_name)
 
         try:
             result = tool.execute(**repaired_args)

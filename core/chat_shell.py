@@ -55,34 +55,37 @@ def run_plain_chat(
     brain: BrainService | None = None,
 ) -> None:
     controller = create_session_controller(settings=settings, brain=brain)
-    _drain_startup_events(controller)
-    print(
-        f"  {settings.assistant_name} plain chat. Type your message. '/quit' to exit. "
-        f"[backend: {settings.llm_backend} | model: {settings.mlx_model}]\n"
-    )
+    try:
+        _drain_startup_events(controller)
+        print(
+            f"  {settings.assistant_name} plain chat. Type your message. '/quit' to exit. "
+            f"[backend: {settings.llm_backend} | model: {settings.mlx_model}]\n"
+        )
 
-    while True:
-        try:
-            raw = input("[You]: ")
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n[{settings.assistant_name}] Going offline.")
-            return
-
-        user_text = raw.strip()
-        if not user_text:
-            continue
-
-        command = parse_slash_command(user_text)
-        if command is not None:
-            outcome = handle_command(controller, command)
-            if outcome.message:
-                print(f"[{settings.assistant_name}] {outcome.message}\n")
-            if outcome.should_exit:
+        while True:
+            try:
+                raw = input("[You]: ")
+            except (EOFError, KeyboardInterrupt):
+                print(f"\n[{settings.assistant_name}] Going offline.")
                 return
-            continue
 
-        controller.submit(user_text)
-        _render_plain_turn(controller, assistant_name=settings.assistant_name, timing=timing)
+            user_text = raw.strip()
+            if not user_text:
+                continue
+
+            command = parse_slash_command(user_text)
+            if command is not None:
+                outcome = handle_command(controller, command)
+                if outcome.message:
+                    print(f"[{settings.assistant_name}] {outcome.message}\n")
+                if outcome.should_exit:
+                    return
+                continue
+
+            controller.submit(user_text)
+            _render_plain_turn(controller, assistant_name=settings.assistant_name, timing=timing)
+    finally:
+        controller.close()
 
 
 def _drain_startup_events(controller: SessionController) -> None:
