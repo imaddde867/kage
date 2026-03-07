@@ -39,6 +39,9 @@ class RequestOrchestrator:
         )
 
     def handle(self, request: Request, *, runtime: Any) -> Iterator[str]:
+        report_status = getattr(runtime, "report_status", None)
+        if callable(report_status):
+            report_status("planning", detail="Inspecting request")
         catalog = self._catalog(runtime)
         decision = self._execution_planner.plan(
             user_input=request.text,
@@ -55,6 +58,8 @@ class RequestOrchestrator:
         runtime.record_decision_trace(decision, context_plan)
 
         if decision.capability_query:
+            if callable(report_status):
+                report_status("capability_query", detail="Summarizing available connectors")
             capability = runtime.capability_response(request.text)
             if capability:
                 yield capability
@@ -62,6 +67,8 @@ class RequestOrchestrator:
                 return
 
         if decision.tooling_unavailable:
+            if callable(report_status):
+                report_status("tools_unavailable", detail="Tooling is disabled for this session")
             fallback = runtime.tooling_unavailable_response(
                 request.text,
                 decision=decision,
@@ -73,6 +80,8 @@ class RequestOrchestrator:
                 return
 
         if decision.use_agent and decision.strategy in {Strategy.TOOL_PLAN, Strategy.MIXED_EVIDENCE}:
+            if callable(report_status):
+                report_status("checking_tools", detail="Using connectors to gather evidence")
             context = runtime.agent_context(request.text, context_plan)
             parts: list[str] = []
             for chunk in self._action_executor.run_agent(
@@ -85,6 +94,8 @@ class RequestOrchestrator:
             runtime.persist_exchange(request.text, "".join(parts).strip())
             return
 
+        if callable(report_status):
+            report_status("drafting_answer", detail="Streaming response")
         yield from runtime.direct_response_stream(
             request.text,
             text_mode=request.text_mode,

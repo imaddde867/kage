@@ -38,10 +38,19 @@ class ToolRegistry:
     so schema_block() lists them in the order they were registered.
     """
 
-    def __init__(self, *, trace_store: Any | None = None, evidence_store: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        trace_store: Any | None = None,
+        evidence_store: Any | None = None,
+        on_tool_start: Any | None = None,
+        on_tool_finish: Any | None = None,
+    ) -> None:
         self._tools: dict[str, Tool] = {}
         self._trace_store = trace_store
         self._evidence_store = evidence_store
+        self._on_tool_start = on_tool_start
+        self._on_tool_finish = on_tool_finish
 
     def register(self, tool: Tool) -> None:
         """Add a tool to the registry.
@@ -196,6 +205,11 @@ class ToolRegistry:
             )
 
         repaired_args = self._repair_args(tool_name, call.args)
+        if callable(self._on_tool_start):
+            try:
+                self._on_tool_start(tool_name, dict(repaired_args))
+            except Exception:
+                logger.debug("Tool start callback failed for '%s'", tool_name)
         validation_error = self._validate_args(tool, repaired_args)
         if validation_error:
             return self._finalize(
@@ -264,5 +278,11 @@ class ToolRegistry:
                 )
             except Exception:
                 logger.debug("Evidence recording failed for tool '%s'", result.tool_name)
+
+        if callable(self._on_tool_finish):
+            try:
+                self._on_tool_finish(result)
+            except Exception:
+                logger.debug("Tool finish callback failed for '%s'", result.tool_name)
 
         return result

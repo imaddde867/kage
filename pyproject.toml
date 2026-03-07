@@ -10,7 +10,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
+[project.scripts]
+kage = "core.cli:main"
+
 [tool.setuptools]
+py-modules = ["config"]
 packages = [
   "core",
   "core.agent",
