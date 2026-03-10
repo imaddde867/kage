@@ -1,3 +1,16 @@
+"""Structured entity persistence for the second-brain layer.
+
+Entities are typed key/value records (tasks, commitments, profile facts,
+preferences) stored in SQLite via KnowledgeStore.  EntityStore is the
+only access point for second-brain data — nothing else should touch the
+underlying KnowledgeStore directly.
+
+Kinds in use:
+    task        — actionable items with optional due dates
+    commitment  — promises or events with optional dates
+    profile     — stable personal facts (e.g. name, job, location)
+    preference  — user preferences (e.g. "prefers metric units")
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,9 +36,6 @@ class Entity:
 class EntityStore:
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
-        self._store = KnowledgeStore(self.db_path)
-
-    def _init_schema(self) -> None:
         self._store = KnowledgeStore(self.db_path)
 
     def upsert(

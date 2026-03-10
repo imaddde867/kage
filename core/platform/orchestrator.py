@@ -1,3 +1,16 @@
+"""Request orchestration — the decision and control plane for every LLM request.
+
+RequestOrchestrator coordinates the four planning/execution steps that happen
+before a response is streamed back to the caller:
+
+  1. CapabilityCatalog build — inspect which tools are registered and healthy.
+  2. ExecutionPlanner.plan() — choose strategy (direct / agent / retrieval).
+  3. ContextPlanner.plan()  — decide which memory/entity sources to inject.
+  4. Dispatch to the right executor (agent loop or direct LLM stream).
+
+BrainService is a compatibility facade that owns the runtime state (model,
+memory, tool registry).  All routing decisions belong here.
+"""
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -11,11 +24,7 @@ from core.platform.models import Request, Strategy
 
 
 class RequestOrchestrator:
-    """Decision/control plane for request handling.
-
-    BrainService remains as a compatibility facade for now, but all high-level
-    request decisions should flow through this class.
-    """
+    """Decision and control plane for all LLM request handling."""
 
     def __init__(
         self,

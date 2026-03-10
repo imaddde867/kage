@@ -1,3 +1,14 @@
+"""Prompt construction for the conversational (non-agent) path.
+
+Assembles the message list that gets fed to the LLM:
+  - System prompt with identity, style, grounding rules, and optional
+    injected context (memory, entity facts, policy notes, topic hints).
+  - Recent turns from the conversation buffer.
+  - The current user message.
+
+All functions here are pure — no I/O, no model calls.  The only external
+dependency is datetime for the current-date grounding line.
+"""
 from __future__ import annotations
 
 from collections import deque

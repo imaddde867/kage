@@ -3,289 +3,202 @@
   <img src="kage.gif" alt="Kage the black horse" width="420" />
 </p>
 
-Kage is a fully local personal AI for macOS: wake word -> speech -> local reasoning -> spoken response, with persistent memory and optional tool use.
+Kage is a fully local personal AI for macOS. Say the wake word, it listens, reasons locally, and responds aloud. No cloud inference, no subscriptions, no data leaving your machine.
 
-No cloud inference. No subscriptions. Data stays on your machine.
+## How it works
 
-## Current State
+```
+wake word → transcribe → think → speak
+```
 
-Kage currently runs three layers:
+Voice mode listens for "hey Jarvis", captures your speech, runs it through a local LLM, and speaks the response. Text mode skips the mic and speaker — same reasoning, just a terminal chat UI.
 
-1. Core assistant loop (voice/text, STT, LLM, TTS).
-2. Second brain (structured entity memory: tasks, commitments, profile facts, preferences).
-3. Agent layer (tool-calling loop with connectors + heartbeat reminders).
+Memory persists in SQLite. An optional agent layer adds tool use (web search, calendar, reminders, shell). An optional heartbeat daemon speaks proactive task reminders when you're idle.
 
 ## Stack
 
-| Layer        | Tool                                                                                           | Why                                      |
-| ------------ | ---------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| LLM          | [MLX-VLM](https://github.com/Blaizzy/mlx-vlm) / [MLX-LM](https://github.com/ml-explore/mlx-lm) | Fast local inference on Apple Silicon    |
-| Wake word    | [openwakeword](https://github.com/dscripka/openWakeWord)                                       | Lightweight, CPU-only, offline           |
-| STT          | `SpeechRecognition` (Apple backend)                                                            | Native macOS recognition                 |
-| STT fallback | [faster-whisper](https://github.com/guillaumekleeven/faster-whisper)                           | Local fallback                           |
-| TTS          | [mlx-audio](https://github.com/Blaizzy/mlx-audio) + Kokoro-82M                                 | Local speech synthesis                   |
-| Memory       | SQLite                                                                                         | Durable local storage                    |
-| Web tools    | `duckduckgo-search`, `scrapling[fetchers]`, `httpx`, `trafilatura`                             | Agent web search + adaptive page fetch    |
+| Layer | Tool | Why |
+|---|---|---|
+| LLM | [MLX-VLM](https://github.com/Blaizzy/mlx-vlm) / [MLX-LM](https://github.com/ml-explore/mlx-lm) | Fast local inference on Apple Silicon |
+| Wake word | [openwakeword](https://github.com/dscripka/openWakeWord) | Lightweight, CPU-only, offline |
+| STT | macOS `SpeechRecognition` | Native; zero latency overhead |
+| STT fallback | [faster-whisper](https://github.com/guillaumekleeven/faster-whisper) | Local fallback when Apple STT fails |
+| TTS | [mlx-audio](https://github.com/Blaizzy/mlx-audio) + Kokoro-82M | Local, low-latency speech synthesis |
+| Memory | SQLite | Durable, zero-dependency local storage |
+| Web tools | `ddgs`, `scrapling`, `httpx`, `trafilatura` | Agent web search + page extraction |
 
 ## Setup
 
-Prerequisite: Python 3.11 on Apple Silicon.
+Requires Python 3.11 on Apple Silicon.
 
 ```bash
-# 1) Create environment
 micromamba create -n kage python=3.11 pip -y
 micromamba activate kage
-
-# 2) Install dependencies (includes connector deps)
 pip install -r requirements.txt
 pip install -e .
-
-# 3) Configure
 cp .env.example .env
-# Edit .env as needed
-
-# 4) Run
-kage chat                # full-screen Textual chat UI
-kage chat --plain        # plain terminal fallback
-kage voice               # voice mode
-kage bench               # inference benchmark
-python3 main.py --text   # compatibility shim -> kage chat
-python3 main.py          # compatibility shim -> kage voice
 ```
 
-## Connectors and Tools
+Edit `.env` to set your name and preferred model. Everything else works out of the box.
 
-When `AGENT_ENABLED=true`, the agent can use these tools via `ToolRegistry`:
+## Running
 
-- `web_search`: DuckDuckGo text search with source URLs (`duckduckgo-search`)
-- `web_fetch`: Scrapling-first URL fetch + readable extraction with safe fallback (`scrapling[fetchers]`, `httpx`, `trafilatura`)
-- `shell`: read-only allowlisted local shell commands only
-- `notify`: macOS notification via `osascript`
-- `speak`: direct TTS output
-- `calendar_read`: read upcoming events from macOS Calendar (`osascript`)
-- `reminder_add`: add reminder in macOS Reminders (`osascript`)
-- `mark_task_done`, `update_fact`, `list_open_tasks`: second-brain memory tools
+```bash
+kage chat          # full-screen Textual chat UI (default)
+kage chat --plain  # plain terminal fallback
+kage voice         # voice mode (wake word → listen → respond aloud)
+kage bench         # run an inference benchmark and exit
+kage doctor        # check environment and dependency status
+```
 
-Notes:
+Legacy shims still work: `python main.py --text` → chat, `python main.py` → voice.
 
-- Calendar/Reminders/notifications require macOS and AppleScript permissions.
-- `shell` is read-only and blocks pipes/redirection/operators; mutating shell actions are exposed separately via `shell_mutation` and require explicit confirmation.
-- `web_fetch` prefers Scrapling fetchers and falls back to `httpx` if needed.
+## Configuration
 
-## Configuration (`.env`)
+All settings are in `.env`. Copy `.env.example` to get started.
 
-### Core Inference
+### Model
 
-| Variable          | Default                             | Description                                      |
-| ----------------- | ----------------------------------- | ------------------------------------------------ |
-| `LLM_BACKEND`     | `mlx_vlm`                           | `mlx_vlm` (VLM checkpoints) or `mlx` (text-only checkpoints) |
-| `MLX_MODEL`       | `mlx-community/Qwen3.5-9B-MLX-4bit` | Active model (swap this value to change models)  |
-| `MLX_DRAFT_MODEL` | ``                                  | Optional speculative draft model (`mlx` backend) |
-| `MLX_MAX_TOKENS`  | `160`                               | Generation cap                                   |
-| `TEMPERATURE`     | `0.0`                               | Sampling temperature for conversational responses |
+| Variable | Default | Notes |
+|---|---|---|
+| `LLM_BACKEND` | `mlx_vlm` | `mlx_vlm` for Qwen3.5 VLM checkpoints; `mlx` for text-only |
+| `MLX_MODEL` | `mlx-community/Qwen3.5-4B-MLX-4bit` | Swap this to change models |
+| `MLX_MAX_TOKENS` | `160` | Generation cap per response |
+| `TEMPERATURE` | `0.0` | 0 = deterministic; raise for more creative outputs |
 
-Model profiles:
+Tested model profiles (M4 16GB, benchmarked):
 
-- `mlx-community/Qwen3.5-9B-MLX-4bit` + `LLM_BACKEND=mlx_vlm`
-- `mlx-community/Qwen3.5-4B-MLX-4bit` + `LLM_BACKEND=mlx_vlm`
-- `mlx-community/Qwen2.5-14B-Instruct-MLX-4bit` + `LLM_BACKEND=mlx`
+| Model | Backend | tok/s | TTFT |
+|---|---|---:|---:|
+| `Qwen3.5-4B-MLX-4bit` | `mlx_vlm` | 39.6 | ~350ms |
+| `Qwen3.5-9B-MLX-4bit` | `mlx_vlm` | 16.5 | ~535ms |
+| `Qwen2.5-7B-Instruct-4bit` | `mlx` | 24.1 | ~400ms |
 
-Important:
+The 4B is the default — same quality as 9B for conversational use, 2.4× faster.
 
-- `mlx-community/Qwen3.5-9B-MLX-4bit` is a VLM checkpoint (includes `vision_tower` weights), so it must run with `LLM_BACKEND=mlx_vlm`.
-- If you only need text and want lower latency, use a text-only checkpoint with `LLM_BACKEND=mlx`.
-- Defaults are tuned for low-latency M4 usage (lean context, deterministic sampling, optional heavy features off by default).
+> Note: Qwen3.5 checkpoints include vision weights and must use `LLM_BACKEND=mlx_vlm`. For a text-only model with lower memory, use a `Qwen2.5-*-Instruct` checkpoint with `LLM_BACKEND=mlx`.
 
-### Voice / Audio
+### Voice
 
-| Variable              | Default                         | Description              |
-| --------------------- | ------------------------------- | ------------------------ |
-| `WAKE_WORD`           | `hey jarvis`                    | Display wake phrase      |
-| `WAKE_WORD_MODEL`     | `hey_jarvis`                    | openwakeword model name  |
-| `WAKE_WORD_THRESHOLD` | `0.5`                           | Wake detection threshold |
-| `STT_BACKEND`         | `apple`                         | `apple` or `whisper`     |
-| `WHISPER_MODEL`       | `base`                          | Whisper model size       |
-| `KOKORO_MODEL`        | `mlx-community/Kokoro-82M-bf16` | TTS model                |
-| `KOKORO_VOICE`        | `af_heart`                      | Voice preset             |
-| `KOKORO_SPEED`        | `1.0`                           | Speech speed             |
-| `KOKORO_LANG_CODE`    | `en-us`                         | Language/accent          |
+| Variable | Default | Notes |
+|---|---|---|
+| `WAKE_WORD` | `hey jarvis` | Displayed phrase |
+| `WAKE_WORD_MODEL` | `hey_jarvis` | openwakeword model file |
+| `WAKE_WORD_THRESHOLD` | `0.5` | Detection confidence threshold |
+| `STT_BACKEND` | `apple` | `apple` or `whisper` |
+| `WHISPER_MODEL` | `base` | Only used when `STT_BACKEND=whisper` |
+| `KOKORO_VOICE` | `af_heart` | Voice preset (`bf_emma`, `bm_george`, etc.) |
+| `KOKORO_SPEED` | `1.0` | Speech rate multiplier |
+| `KOKORO_LANG_CODE` | `en-us` | Language/accent (`en-gb`, `ja`, `zh`) |
 
-### Audio Tuning
+### Identity
 
-| Variable               | Default | Description                       |
-| ---------------------- | ------- | --------------------------------- |
-| `SAMPLE_RATE`          | `16000` | Input sample rate                 |
-| `WAKE_WORD_CHUNK_SIZE` | `1280`  | Wake detector chunk size          |
-| `RECORD_CHUNK_SIZE`    | `1024`  | Recording chunk size              |
-| `SILENCE_THRESHOLD`    | `500`   | Silence cutoff                    |
-| `SILENCE_DURATION`     | `1.5`   | Seconds of silence to end capture |
-| `MAX_RECORD_SECONDS`   | `30`    | Max per-turn record duration      |
+| Variable | Default | Notes |
+|---|---|---|
+| `USER_NAME` | `Imad` | Shown in prompts |
+| `ASSISTANT_NAME` | `Kage` | Display name |
+| `TTS_NAME_PRONUNCIATION` | `Kah-gay` | How the name is spoken aloud |
 
-### Turn Taking / Barge-In
+### Optional features (all off by default)
 
-| Variable                | Default | Description                              |
-| ----------------------- | ------- | ---------------------------------------- |
-| `ALLOW_BARGE_IN`        | `true`  | Allow interruption while TTS is speaking |
-| `INTERRUPT_MIN_SCORE`   | `0.55`  | Wake score threshold during TTS          |
-| `INTERRUPT_HOLD_MS`     | `220`   | Required speech hold after wake hit      |
-| `INTERRUPT_DEBOUNCE_MS` | `500`   | Minimum gap between interrupts           |
-| `POST_TTS_GUARD_MS`     | `250`   | Guard delay before reopening mic         |
+| Variable | Default | What it does |
+|---|---|---|
+| `AGENT_ENABLED` | `false` | Enable tool-using agent loop |
+| `AGENT_MAX_STEPS` | `8` | Max tool steps per request |
+| `SECOND_BRAIN_ENABLED` | `false` | Enable structured entity memory (tasks, facts, preferences) |
+| `EXTRACTION_ENABLED` | `false` | Extract entities from each conversation turn |
+| `HEARTBEAT_ENABLED` | `false` | Proactive reminders daemon (voice mode only) |
+| `HEARTBEAT_INTERVAL_SECONDS` | `300` | How often the heartbeat checks for due tasks |
+| `DND_START_HOUR` | `23` | Start of quiet hours (24h) |
+| `DND_END_HOUR` | `7` | End of quiet hours |
+| `TEXT_MODE_TTS_ENABLED` | `false` | Speak responses aloud in text/chat mode |
 
-### Identity / Text Mode
+See `.env.example` for the full list including audio tuning, barge-in, TLS, and calendar settings.
 
-| Variable                         | Default                            | Description                                 |
-| -------------------------------- | ---------------------------------- | ------------------------------------------- |
-| `USER_NAME`                      | `Imad`                             | User name used in prompts                   |
-| `ASSISTANT_NAME`                 | `Kage`                             | Assistant display name                      |
-| `TTS_NAME_OVERRIDE_ENABLED`      | `true`                             | Apply spoken-name replacement               |
-| `TTS_NAME_PRONUNCIATION`         | `Kah-gay`                          | Spoken alias                                |
-| `STT_NAME_NORMALIZATION_ENABLED` | `true`                             | Normalize variants back to `ASSISTANT_NAME` |
-| `STT_NAME_VARIANTS`              | `kage,cage,kaj,kaige,kahge,ka-geh` | Accepted STT variants                       |
-| `TEXT_MODE_TTS_ENABLED`          | `false`                            | Speak responses in `--text` mode            |
+## Tools (when `AGENT_ENABLED=true`)
 
-### Memory / Second Brain
+| Tool | What it does |
+|---|---|
+| `web_search` | DuckDuckGo search — no API key needed |
+| `web_fetch` | Fetch and extract readable text from a URL |
+| `shell` | Read-only allowlisted shell commands |
+| `notify` | macOS notification banner |
+| `speak` | Trigger TTS mid-chain |
+| `calendar_read` | Read upcoming events from macOS Calendar |
+| `reminder_add` | Add a reminder to macOS Reminders |
+| `mark_task_done` | Mark a second-brain task as complete |
+| `update_fact` | Update a stored fact or preference |
+| `list_open_tasks` | List active tasks from second-brain memory |
 
-| Variable                     | Default         | Description                                 |
-| ---------------------------- | --------------- | ------------------------------------------- |
-| `MEMORY_DIR`                 | `./data/memory` | SQLite location                             |
-| `RECENT_TURNS`               | `0`             | Recent turn buffer                          |
-| `SECOND_BRAIN_ENABLED`       | `false`         | Master switch for entity memory layer       |
-| `EXTRACTION_ENABLED`         | `false`         | Run entity extraction after each turn       |
-| `ENTITY_RECALL_BUDGET`       | `400`           | Max characters of entity context in prompts |
-| `PROACTIVE_DEBOUNCE_SECONDS` | `60`            | Debounce for proactive suggestions          |
-
-### Agent / Heartbeat
-
-| Variable                     | Default | Description                                             |
-| ---------------------------- | ------- | ------------------------------------------------------- |
-| `AGENT_ENABLED`              | `false` | Enable tool-using agent loop                            |
-| `AGENT_MAX_STEPS`            | `8`     | Max ReAct iterations per request                        |
-| `AGENT_TEMPERATURE`          | `0.0`   | Sampling temperature for tool-mode generations          |
-| `AGENT_ENTITY_MODE`          | `relevance_filtered` | Entity recall mode: `personal_only`, `relevance_filtered`, `full` |
-| `AGENT_HISTORY_CHAR_BUDGET`  | `8000`  | Max combined chars retained in agent step history       |
-| `AGENT_OBSERVATION_MAX_CHARS`| `1800`  | Per-tool-observation compression cap                    |
-| `HEARTBEAT_ENABLED`          | `false` | Start background proactive reminder daemon (voice mode) |
-| `HEARTBEAT_INTERVAL_SECONDS` | `300`   | Heartbeat tick interval                                 |
-| `DND_START_HOUR`             | `23`    | Do-not-disturb start hour (24h)                         |
-| `DND_END_HOUR`               | `7`     | Do-not-disturb end hour (24h)                           |
-| `WEB_FETCH_TLS_MODE`         | `strict` | TLS policy for `web_fetch`: `strict` or `allow_insecure_fallback` |
-| `WEB_FETCH_INSECURE_FALLBACK_DOMAINS` | `` | CSV allowlist of trusted domains permitted for insecure fallback |
-| `WEB_FETCH_TLS_RETRY_WITH_CERTIFI` | `true` | Retry SSL failures once using certifi CA bundle before insecure fallback |
-| `CALENDAR_READ_TIMEOUT_SECONDS` | `10` | Per-attempt timeout for `calendar_read` AppleScript call |
-| `CALENDAR_READ_RETRY_COUNT`  | `1`     | Retry count for timeout-only `calendar_read` failures   |
-| `CALENDAR_READ_RETRY_DELAY_SECONDS` | `0.4` | Delay between `calendar_read` timeout retries           |
+Calendar, Reminders, and notifications require macOS and AppleScript/Accessibility permissions. `shell` blocks all write operations and pipes by default.
 
 ## Architecture
 
-```text
-main.py -> core.cli
-├── chat:  SessionController -> Textual/plain shell -> BrainService
-├── voice: ListenerService -> BrainService -> speak()
-└── bench: benchmark runner -> BrainService
+```
+main.py → core.cli
+├── chat:  SessionController → Textual UI / plain shell → BrainService
+├── voice: ListenerService → BrainService → speak()
+└── bench: run_bench() → BrainService
 
 BrainService request flow
-1) guardrails state update
-2) RequestOrchestrator plans strategy + context + capabilities
-3) if AGENT_ENABLED and planner selects tools:
-     AgentLoop (JSON-first step envelope with XML fallback) -> ToolRegistry -> connectors
-   else:
-     classic conversational path
-     (intent route -> prompt build -> LLM stream)
-4) persist exchange/evidence/traces to SQLite
-5) optional entity extraction (LLMEntityExtractor -> EntityStore)
-6) optional proactive suggestion
-
-Voice mode only
-- HeartbeatAgent daemon wakes every HEARTBEAT_INTERVAL_SECONDS
-- checks DND + audio-idle + debounce
-- speaks due/overdue task reminders
+1. Guardrails check — deterministic overrides (temporal uncertainty, safety)
+2. RequestOrchestrator — plans strategy, retrieves context, selects capabilities
+3a. Agent path (if tools needed): AgentLoop → ToolRegistry → connectors
+3b. Direct path: prompt build → LLM stream → sentence splitter
+4. Persist exchange to SQLite
+5. Entity extraction (optional: LLMEntityExtractor → EntityStore)
+6. Proactive suggestion check (optional)
 ```
 
-Key modules:
+Key files:
 
-- `core/brain.py`: compatibility facade over `RequestOrchestrator`
-- `core/session.py`: typed session-event bridge between `BrainService` and terminal UIs
-- `core/textual_chat.py`: full-screen Textual chat application
-- `core/chat_shell.py`: plain terminal fallback built on `SessionController`
-- `core/cli.py`: public CLI entrypoint with `chat`, `voice`, `bench`, and `doctor`
-- `core/platform/orchestrator.py`: agent-core request orchestration
-- `core/platform/execution_planner.py`: unified strategy planner (direct/retrieval/tool/mixed)
-- `core/platform/context_planner.py`: context source and budget planning
-- `core/platform/capability_catalog.py`: capability metadata + health scoring
-- `core/platform/storage/*`: shared schema owner + conversation/knowledge/evidence/trace stores
-- `core/intent_signals.py`: modular weighted intent scoring used by routing/context decisions
-- `core/agent/loop.py`: multi-step tool loop
-- `core/agent/tool_registry.py`: connector dispatch
-- `connectors/*.py`: individual tool implementations
-- `core/second_brain/entity_store.py`: structured memory persistence
-- `core/second_brain/llm_extractor.py`: LLM-based entity extraction
-- `core/agent/heartbeat.py`: proactive background reminders
+- `core/brain.py` — compatibility facade; entry point for all LLM requests
+- `core/platform/orchestrator.py` — routes each request through context + strategy planning
+- `core/platform/execution_planner.py` — decides direct vs. agent path
+- `core/agent/loop.py` — multi-step ReAct tool loop
+- `core/session.py` — typed event bridge between BrainService and terminal UIs
+- `core/listener.py` — wake word detection and STT
+- `core/speaker.py` — Kokoro TTS playback
+- `core/memory.py` — SQLite conversation memory with token-overlap recall
+- `core/second_brain/entity_store.py` — structured entity persistence
 
 ## Testing
 
-Run the test suite:
+```bash
+~/micromamba/envs/kage/bin/python -m unittest discover -s tests -p 'test_*.py'
+```
+
+273 tests. No external services required — all connectors are mocked.
+
+Quick sanity checks:
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_*.py'
+# Verify settings load correctly
+python -c "import config; s = config.get(); print(s.llm_backend, s.mlx_model)"
+
+# Check which optional features are on
+python -c "import config; s = config.get(); print('agent:', s.agent_enabled, '| second_brain:', s.second_brain_enabled)"
+
+# Inspect stored entities
+sqlite3 data/memory/kage_memory.db "SELECT kind, key, value, status FROM entities;"
 ```
-
-Quick local performance benchmark:
-
-```bash
-python3 main.py --bench
-```
-
-Deep capability benchmark (offline eval harness):
-
-```bash
-python3 benchmarks/deep_capability_benchmark.py
-```
-
-Current suite size (as of 2026-03-06): 238 tests.
-
-M4 performance notes and tuning guide:
-
-```text
-docs/PERFORMANCE_M4.md
-```
-
-Useful sanity checks:
-
-```bash
-# Verify loaded flags
-python3 -c "import config; s=config.get(); print(s.agent_enabled, s.heartbeat_enabled, s.second_brain_enabled)"
-
-# Check architecture + low-power mode
-python3 -c "import platform; print(platform.machine())" && pmset -g | grep -i lowpowermode
-
-# Inspect entity table
-sqlite3 data/memory/kage_memory.db ".schema entities"
-sqlite3 data/memory/kage_memory.db "SELECT kind,key,value,due_date,status FROM entities;"
-```
-
----
 
 ## Roadmap
 
-Ordered by value delivered:
+Done:
+- [x] Voice loop — wake word, STT, LLM, TTS, barge-in
+- [x] Persistent conversation memory with semantic recall
+- [x] Second brain — tasks, facts, commitments, preferences
+- [x] Agent layer — tool-using ReAct loop with web, shell, calendar, reminders
+- [x] Textual chat UI with session management
 
-- [x] **Second brain entity memory** — tasks, commitments, profile, preferences extracted and recalled
-- [x] **Intent routing** — classify before LLM call; inject entities only when needed
-- [x] **Proactive suggestions** — debounced, mention-aware reminders
+Near-term:
+- [ ] Task completion detection — reliably call `mark_task_done` on "done / finished" phrases
+- [ ] Agent reliability pass — handle tool timeouts and failures gracefully
+- [ ] Entity dedup — merge conflicting facts instead of stacking them
+- [ ] Source attribution — include URL snippets when web results inform a response
 
-Near-term (high confidence):
-
-- [ ] **Close the loop on tasks** — detect completion phrases ("done", "finished") and call `mark_task_done` reliably, with tests for false positives
-- [ ] **Agent reliability pass** — harden tool-failure handling (timeouts, retries, clear fallback responses) so tool mode is predictable in daily use
-- [ ] **Memory quality before scale** — add entity dedup/merge rules and conflict handling ("new value replaces old value") to keep recall clean
-- [ ] **On-demand external context** — expose web + calendar lookups only when asked, and include lightweight source attribution in responses
-
-Mid-term (higher effort, still practical):
-
-- [ ] **Streaming STT** — partial transcript while speaking to reduce turn latency and improve interruption handling
-- [ ] **Context budget control** — token-aware budgeting across recent turns, recalled exchanges, and entity context per request
-- [ ] **Recall upgrade path** — introduce BM25 first, then evaluate embeddings only if BM25 quality is insufficient
-
-Later (optional / exploratory):
-
-- [ ] **Wake word customization** — user-trained wake word support once core voice reliability stabilizes
+Later:
+- [ ] Streaming STT — partial transcript during speech for lower turn latency
+- [ ] Token-aware context budgeting across turns, memory, and entity recall
+- [ ] User-trained wake word support

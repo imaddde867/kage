@@ -1,3 +1,13 @@
+"""LLM backend abstraction — model loading and raw token streaming.
+
+Provides GenerationRuntime, which wraps mlx_vlm, mlx_lm, and an
+OpenAI-compatible HTTP server behind a single stream_raw() interface.
+BrainService should call stream_raw() and never touch backend libraries
+directly.
+
+Backend selection is determined by settings.llm_backend at init time.
+Supported values: 'mlx_vlm' (default), 'mlx', 'openai_compat'.
+"""
 from __future__ import annotations
 
 import logging

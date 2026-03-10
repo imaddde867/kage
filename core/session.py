@@ -1,3 +1,17 @@
+"""Typed event bridge between BrainService and terminal UIs.
+
+SessionController runs each conversation turn in a background thread and
+emits SessionEvents onto a queue.  UIs (Textual or plain shell) consume
+the queue and render output without blocking the main thread.
+
+Event kinds:
+    token          — a single streamed text chunk
+    tool_result    — a tool observation returned by the agent
+    status_update  — a short status string for display in the UI header
+    turn_end       — signals the turn is complete (text in data['full_text'])
+    error          — an unhandled exception during the turn
+    __closed__     — sentinel emitted when the session is shut down
+"""
 from __future__ import annotations
 
 import queue
