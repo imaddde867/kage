@@ -1,3 +1,15 @@
+"""Deterministic safety and policy guardrails applied before LLM inference.
+
+Three concerns live here:
+  - Policy state tracking: detect prompt-injection attempts that try to alter
+    the assistant's behaviour (honesty overrides, jailbreaks, compatibility tests).
+  - Deterministic short-circuit responses: return a canned answer without
+    hitting the LLM for questions about current time/date or capability probes.
+  - Policy note derivation: produce a short instruction string appended to the
+    system prompt when the policy state is non-default.
+
+Guardrails run synchronously in the hot path and must stay fast (no I/O).
+"""
 from __future__ import annotations
 
 import re

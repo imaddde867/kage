@@ -1,3 +1,18 @@
+"""Execution strategy planner — decides how to handle each request.
+
+Produces a DecisionPlan with one of four strategies:
+  DIRECT_ANSWER    — answer from LLM + context, no tools
+  TOOL_PLAN        — use the agent loop (tools required, no memory retrieval)
+  MIXED_EVIDENCE   — use the agent loop with task-context memory retrieval
+  RETRIEVAL_ONLY   — episodic memory retrieval, no LLM tool loop
+
+Decision logic (in order):
+  1. Capability query → DIRECT_ANSWER (bypass everything, summarise tools)
+  2. Heuristic signal score → clear tool/no-tool decision without an LLM call
+  3. Ambiguous → classify_ambiguous() (a fast 8-token LLM routing call)
+  4. Agent enabled + tools needed → TOOL_PLAN or MIXED_EVIDENCE
+  5. Fallback → DIRECT_ANSWER
+"""
 from __future__ import annotations
 
 from collections.abc import Callable

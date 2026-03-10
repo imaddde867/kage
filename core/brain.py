@@ -1,3 +1,14 @@
+"""BrainService — the main entry point for all LLM requests.
+
+Acts as a compatibility facade over RequestOrchestrator and the underlying
+runtime components (GenerationRuntime, MemoryStore, AgentLoop, EntityStore).
+Callers (app_runner, SessionController, heartbeat) interact only with this
+class; nothing below it is part of the public API.
+
+Public interface:
+  think_stream(text)      — voice mode: yields sentence-split chunks for TTS
+  think_text_stream(text) — text mode: yields raw token chunks for display
+"""
 from __future__ import annotations
 
 import logging
