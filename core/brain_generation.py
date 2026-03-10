@@ -9,6 +9,7 @@ import config
 
 _BACKEND_MLX = "mlx"
 _BACKEND_MLX_VLM = "mlx_vlm"
+_BACKEND_OPENAI_COMPAT = "openai_compat"
 logger = logging.getLogger(__name__)
 
 
@@ -33,10 +34,12 @@ class GenerationRuntime:
             self._init_mlx_vlm()
         elif self.backend == _BACKEND_MLX:
             self._init_mlx()
+        elif self.backend == _BACKEND_OPENAI_COMPAT:
+            self._init_openai_compat()
         else:
             raise ValueError(
                 f"Unsupported LLM_BACKEND '{self.settings.llm_backend}'. "
-                f"Use one of: {_BACKEND_MLX_VLM}, {_BACKEND_MLX}."
+                f"Use one of: {_BACKEND_MLX_VLM}, {_BACKEND_MLX}, {_BACKEND_OPENAI_COMPAT}."
             )
 
     def _init_mlx_vlm(self) -> None:
@@ -101,7 +104,63 @@ class GenerationRuntime:
 
         self.tokenizer = tokenizer
 
+    def _init_openai_compat(self) -> None:
+        import httpx
+        from transformers import AutoTokenizer
+        from transformers.utils import logging as hf_logging
+
+        logger.info(
+            "Initializing openai_compat runtime (server: %s, model: %s)",
+            self.settings.llm_base_url,
+            self.settings.mlx_model,
+        )
+        prev_level = hf_logging.get_verbosity()
+        hf_logging.set_verbosity_error()
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(self.settings.mlx_model)
+        finally:
+            hf_logging.set_verbosity(prev_level)
+        self.tokenizer = tokenizer
+
+        base_url = self.settings.llm_base_url.rstrip("/")
+        self._http_client = httpx.Client(
+            base_url=base_url,
+            headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
+            timeout=120.0,
+        )
+
+    def _iter_openai_compat_stream(
+        self, *, prompt: str, max_tokens: int, temperature: float
+    ) -> Iterator[str]:
+        import json
+
+        payload = {
+            "model": self.settings.mlx_model,
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }
+        with self._http_client.stream("POST", "/completions", json=payload) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line or not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data.strip() == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data)
+                    text = obj["choices"][0].get("text", "")
+                    if text:
+                        yield text
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+
     def warmup(self, prompt: str, *, max_tokens: int = 5) -> None:
+        if self.backend == _BACKEND_OPENAI_COMPAT:
+            logger.info("Runtime ready (openai_compat — no warmup needed)")
+            return
         logger.info("Warming up runtime")
         for _ in self.stream_raw(prompt, max_tokens=max_tokens):
             pass
@@ -185,6 +244,14 @@ class GenerationRuntime:
         elif self.backend == _BACKEND_MLX:
             gen_iter = iter(
                 self._iter_mlx_stream(
+                    prompt=prompt,
+                    max_tokens=tokens,
+                    temperature=temp,
+                )
+            )
+        elif self.backend == _BACKEND_OPENAI_COMPAT:
+            gen_iter = iter(
+                self._iter_openai_compat_stream(
                     prompt=prompt,
                     max_tokens=tokens,
                     temperature=temp,
