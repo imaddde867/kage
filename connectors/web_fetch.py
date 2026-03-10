@@ -22,7 +22,7 @@ from core.agent.tool_base import Tool, ToolOutcome, ToolResult
 
 try:
     from scrapling.fetchers import Fetcher as _ScraplingFetcher  # type: ignore[import]
-except Exception:
+except ImportError:
     _ScraplingFetcher = None  # type: ignore[assignment]
 else:
     # Scrapling configures its own INFO StreamHandler, which pollutes user-facing

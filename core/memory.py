@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 
 import config
-from core.platform.storage import ConversationStore, connect_db
+from core.platform.storage import ConversationStore
 
 _DB_FILENAME = "kage_memory.db"
 _RECALL_CHAR_BUDGET = 900
@@ -73,18 +73,6 @@ class MemoryStore:
         default_path = Path(config.get().memory_dir).expanduser() / _DB_FILENAME
         self.db_path = Path(self.db_path).expanduser() if self.db_path is not None else default_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conversation = ConversationStore(self.db_path)
-
-    def _connect(self):
-        return connect_db(self.db_path)
-
-    def _init_schema(self) -> None:
-        # Backward-compat shim: schema initialization is now centralized in
-        # core.platform.storage.schema via ConversationStore.
-        self._conversation = ConversationStore(self.db_path)
-
-    def _init_schema_entities(self) -> None:
-        # Backward-compat shim retained for older callers.
         self._conversation = ConversationStore(self.db_path)
 
     def store_exchange(self, user_input: str, assistant_response: str) -> str:
