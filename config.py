@@ -146,6 +146,10 @@ class Settings:
     dnd_start_hour: int             # DND_START_HOUR — 24h hour (0–23) when quiet period begins
     dnd_end_hour: int               # DND_END_HOUR   — 24h hour (0–23) when quiet period ends
 
+    # OpenAI-compatible server (used when LLM_BACKEND=openai_compat)
+    llm_base_url: str               # LLM_BASE_URL — base URL of the OpenAI-compatible server
+    llm_api_key: str                # LLM_API_KEY  — API key (any string; mlx_lm.server ignores it)
+
     # Web fetch TLS mode — controls SSL certificate verification in web_fetch.
     # 'strict' (default): refuse connections with invalid/self-signed certificates.
     # 'allow_insecure_fallback': retry with verify=False on SSL failure and annotate
@@ -218,6 +222,8 @@ def get() -> Settings:
         heartbeat_interval_seconds=_env_int("HEARTBEAT_INTERVAL_SECONDS", 300),
         dnd_start_hour=_env_int("DND_START_HOUR", 23),
         dnd_end_hour=_env_int("DND_END_HOUR", 7),
+        llm_base_url=_env_str("LLM_BASE_URL", "http://localhost:8080/v1"),
+        llm_api_key=_env_str("LLM_API_KEY", "none"),
         web_fetch_tls_mode=_env_str("WEB_FETCH_TLS_MODE", "strict"),
         web_fetch_insecure_fallback_domains=_env_csv(
             "WEB_FETCH_INSECURE_FALLBACK_DOMAINS",
