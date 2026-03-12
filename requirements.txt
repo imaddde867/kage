@@ -28,3 +28,5 @@ duckduckgo-search
 scrapling[fetchers]
 httpx
 trafilatura
+# JS-rendering browser fetch (optional; after install run: playwright install chromium)
+playwright

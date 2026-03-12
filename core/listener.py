@@ -4,6 +4,7 @@ import logging
 import math
 import re
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -100,6 +101,54 @@ class ListenerService:
                     silence = 0
 
         return np.concatenate(chunks).astype(np.int16, copy=False) if chunks else np.array([], dtype=np.int16)
+
+    def record_with_partial_transcripts(self) -> Iterator[tuple[str, bool]]:
+        """Yield partial transcripts while recording, then yield the final transcript.
+
+        Tuples are `(text, is_final)`. The final item is always emitted with
+        `is_final=True` (possibly with empty text when nothing was captured).
+        """
+        logger.info("Listening for user speech (streaming STT)")
+        chunk = self.settings.record_chunk_size
+        chunks: list[np.ndarray] = []
+        silence = 0
+        silence_needed = int(self.settings.silence_duration * self.settings.sample_rate / chunk)
+        max_chunks = int(self.settings.max_record_seconds * self.settings.sample_rate / chunk)
+        partial_interval = float(getattr(self.settings, "stt_stream_interval_seconds", 0.8))
+        partial_every = max(1, int(partial_interval * self.settings.sample_rate / chunk))
+        min_chars = max(0, int(getattr(self.settings, "stt_stream_min_chars", 0)))
+        last_partial = ""
+
+        sd_lib = self._require_sounddevice()
+        with sd_lib.InputStream(samplerate=self.settings.sample_rate, channels=1, dtype="int16", blocksize=chunk) as stream:
+            for idx in range(max_chunks):
+                audio, _ = stream.read(chunk)
+                flat = np.asarray(audio, dtype=np.int16).reshape(-1)
+                chunks.append(flat.copy())
+
+                if (idx + 1) % partial_every == 0 and chunks:
+                    preview_audio = np.concatenate(chunks).astype(np.int16, copy=False)
+                    partial = self.transcribe(preview_audio).strip()
+                    if partial and len(partial) >= min_chars and partial != last_partial:
+                        last_partial = partial
+                        yield partial, False
+
+                if np.abs(flat).mean() < self.settings.silence_threshold:
+                    silence += 1
+                    if silence >= silence_needed:
+                        break
+                else:
+                    silence = 0
+
+        final_audio = np.concatenate(chunks).astype(np.int16, copy=False) if chunks else np.array([], dtype=np.int16)
+        final_text = self.transcribe(final_audio).strip()
+        if final_text:
+            yield final_text, True
+            return
+        if last_partial:
+            yield last_partial, True
+            return
+        yield "", True
 
     def reset_interrupt_detector(self) -> None:
         self._interrupt_wake_armed = False

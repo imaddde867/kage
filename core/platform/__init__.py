@@ -6,12 +6,16 @@ from .models import (
     Capability,
     ContextPlan,
     DecisionPlan,
+    ExecutionIntent,
     ProactiveOpportunity,
     Request,
+    RiskTier,
     SideEffectLevel,
     Strategy,
+    TaskStatus,
 )
 from .orchestrator import RequestOrchestrator
+from .policy_engine import PolicyEngine
 from .proactive_policy import ProactivePolicyEngine
 
 __all__ = [
@@ -21,11 +25,15 @@ __all__ = [
     "ContextPlan",
     "ContextPlanner",
     "DecisionPlan",
+    "ExecutionIntent",
     "ExecutionPlanner",
+    "PolicyEngine",
     "ProactiveOpportunity",
     "ProactivePolicyEngine",
     "Request",
     "RequestOrchestrator",
+    "RiskTier",
     "SideEffectLevel",
     "Strategy",
+    "TaskStatus",
 ]

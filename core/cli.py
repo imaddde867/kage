@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
+from pathlib import Path
+import shutil
 import sys
+from dataclasses import dataclass
 from typing import Sequence
 
 import config
@@ -36,28 +40,342 @@ def launch_bench(*, settings: config.Settings) -> None:
     run_bench(settings)
 
 
-def run_doctor(*, settings: config.Settings) -> None:
-    checks = [
-        ("textual", _module_available("textual")),
-        ("sounddevice", _module_available("sounddevice")),
-        ("SpeechRecognition", _module_available("speech_recognition")),
-        ("faster_whisper", _module_available("faster_whisper")),
-        ("ddgs", _module_available("ddgs") or _module_available("duckduckgo_search")),
-        ("scrapling", _module_available("scrapling")),
-        ("httpx", _module_available("httpx")),
-        ("trafilatura", _module_available("trafilatura")),
-    ]
+@dataclass(frozen=True)
+class DoctorCheck:
+    name: str
+    status: str
+    detail: str
 
-    print("Kage doctor")
-    print(f"- backend: {settings.llm_backend}")
-    print(f"- model: {settings.mlx_model}")
-    print(f"- agent_enabled: {settings.agent_enabled}")
-    print(f"- second_brain_enabled: {settings.second_brain_enabled}")
-    print(f"- text_mode_tts_enabled: {settings.text_mode_tts_enabled}")
-    print(f"- memory_dir: {settings.memory_dir}")
-    print("- dependencies:")
-    for name, ok in checks:
-        print(f"  - {name}: {'ok' if ok else 'missing'}")
+
+def _memory_db_path(*, settings: config.Settings) -> Path:
+    return Path(settings.memory_dir).expanduser() / "kage_memory.db"
+
+
+def _looks_like_vlm_model(model_name: str) -> bool:
+    lowered = model_name.strip().lower()
+    return any(token in lowered for token in ("qwen3.5", "vlm", "vision"))
+
+
+def collect_doctor_checks(*, settings: config.Settings) -> list[DoctorCheck]:
+    checks: list[DoctorCheck] = []
+
+    backend = settings.llm_backend.strip().lower()
+    if backend in {"mlx_vlm", "mlx", "openai_compat"}:
+        checks.append(DoctorCheck("backend", "ok", f"Using backend '{backend}'"))
+    else:
+        checks.append(
+            DoctorCheck(
+                "backend",
+                "error",
+                f"Unsupported backend '{settings.llm_backend}'. Expected mlx_vlm, mlx, or openai_compat.",
+            )
+        )
+
+    if backend == "mlx" and _looks_like_vlm_model(settings.mlx_model):
+        checks.append(
+            DoctorCheck(
+                "model_compat",
+                "warning",
+                "Model name looks like a VLM checkpoint while LLM_BACKEND=mlx expects a text-only model.",
+            )
+        )
+    else:
+        checks.append(DoctorCheck("model_compat", "ok", f"Configured model: {settings.mlx_model}"))
+
+    memory_dir = Path(settings.memory_dir).expanduser()
+    memory_parent = memory_dir if memory_dir.exists() else memory_dir.parent
+    if memory_dir.exists() and memory_dir.is_dir() and os.access(memory_dir, os.R_OK | os.W_OK):
+        checks.append(DoctorCheck("memory_dir", "ok", f"Readable and writable: {memory_dir}"))
+    elif memory_dir.exists() and not memory_dir.is_dir():
+        checks.append(DoctorCheck("memory_dir", "error", f"Path exists but is not a directory: {memory_dir}"))
+    elif memory_parent.exists() and os.access(memory_parent, os.W_OK):
+        checks.append(
+            DoctorCheck(
+                "memory_dir",
+                "warning",
+                f"Directory does not exist yet but can be created on first write: {memory_dir}",
+            )
+        )
+    else:
+        checks.append(
+            DoctorCheck(
+                "memory_dir",
+                "error",
+                f"Directory is not writable and cannot be created: {memory_dir}",
+            )
+        )
+
+    dep_checks = {
+        "textual": _module_available("textual"),
+        "sounddevice": _module_available("sounddevice"),
+        "openwakeword": _module_available("openwakeword"),
+        "SpeechRecognition": _module_available("speech_recognition"),
+        "faster_whisper": _module_available("faster_whisper"),
+        "ddgs": _module_available("ddgs") or _module_available("duckduckgo_search"),
+        "scrapling": _module_available("scrapling"),
+        "httpx": _module_available("httpx"),
+        "trafilatura": _module_available("trafilatura"),
+    }
+    for name, ok in dep_checks.items():
+        status = "ok" if ok else "warning"
+        detail = "available" if ok else "missing"
+        checks.append(DoctorCheck(f"dependency:{name}", status, detail))
+
+    if dep_checks["sounddevice"] and dep_checks["openwakeword"]:
+        checks.append(DoctorCheck("voice_stack", "ok", "sounddevice and openwakeword are available"))
+    else:
+        missing = [name for name in ("sounddevice", "openwakeword") if not dep_checks[name]]
+        checks.append(
+            DoctorCheck("voice_stack", "warning", f"Voice mode is incomplete; missing {', '.join(missing)}")
+        )
+
+    stt_backend = settings.stt_backend.strip().lower()
+    if stt_backend == "apple":
+        if dep_checks["SpeechRecognition"]:
+            checks.append(DoctorCheck("stt_backend", "ok", "Apple SpeechRecognition is available"))
+        elif dep_checks["faster_whisper"]:
+            checks.append(
+                DoctorCheck(
+                    "stt_backend",
+                    "warning",
+                    "Apple SpeechRecognition is missing; Whisper fallback is available.",
+                )
+            )
+        else:
+            checks.append(
+                DoctorCheck(
+                    "stt_backend",
+                    "error",
+                    "Apple SpeechRecognition is missing and no Whisper fallback is installed.",
+                )
+            )
+    elif stt_backend == "whisper":
+        status = "ok" if dep_checks["faster_whisper"] else "error"
+        detail = (
+            "Whisper backend is available"
+            if dep_checks["faster_whisper"]
+            else "Whisper backend selected but faster_whisper is not installed"
+        )
+        checks.append(DoctorCheck("stt_backend", status, detail))
+    else:
+        checks.append(DoctorCheck("stt_backend", "warning", f"Unknown STT backend '{settings.stt_backend}'"))
+
+    if settings.agent_enabled:
+        missing = [name for name in ("ddgs",) if not dep_checks[name]]
+        if missing:
+            checks.append(
+                DoctorCheck(
+                    "agent_mode",
+                    "warning",
+                    f"Agent mode is enabled but some core web tooling is missing: {', '.join(missing)}",
+                )
+            )
+        else:
+            checks.append(DoctorCheck("agent_mode", "ok", "Agent mode has its core web dependency available"))
+
+    on_macos = sys.platform == "darwin"
+    osascript_available = shutil.which("osascript") is not None
+    if on_macos and osascript_available:
+        checks.append(
+            DoctorCheck(
+                "apple_automation",
+                "manual",
+                "Calendar, Reminders, Notifications, and Accessibility permissions must be granted when prompted.",
+            )
+        )
+    elif on_macos:
+        checks.append(DoctorCheck("apple_automation", "warning", "osascript is unavailable on this macOS install"))
+    else:
+        checks.append(
+            DoctorCheck(
+                "apple_automation",
+                "warning",
+                "Apple automation features are unavailable because this is not macOS.",
+            )
+        )
+
+    return checks
+
+
+def collect_agent_doctor_checks(*, settings: config.Settings) -> list[DoctorCheck]:
+    from core.platform.policy_engine import valid_policy_mode, valid_risk_tier
+    from core.platform.storage import ApprovalStore
+
+    checks: list[DoctorCheck] = []
+    mode = str(getattr(settings, "agent_policy_mode", "strict")).strip().lower()
+    if valid_policy_mode(mode):
+        checks.append(DoctorCheck("agent_policy_mode", "ok", f"Configured mode '{mode}'"))
+    else:
+        checks.append(
+            DoctorCheck(
+                "agent_policy_mode",
+                "error",
+                f"Unsupported mode '{mode}'. Expected strict, hybrid, or owner_fast.",
+            )
+        )
+
+    raw_tiers = getattr(settings, "agent_approval_required_tiers", ())
+    if not isinstance(raw_tiers, tuple):
+        raw_tiers = tuple(raw_tiers) if isinstance(raw_tiers, list) else ()
+    normalized_tiers = tuple(sorted({str(t).strip().lower() for t in raw_tiers if str(t).strip()}))
+    invalid_tiers = [tier for tier in normalized_tiers if not valid_risk_tier(tier)]
+    if invalid_tiers:
+        checks.append(
+            DoctorCheck(
+                "agent_approval_required_tiers",
+                "error",
+                f"Unsupported tier(s): {', '.join(invalid_tiers)}",
+            )
+        )
+    else:
+        detail = ", ".join(normalized_tiers) if normalized_tiers else "(none)"
+        checks.append(DoctorCheck("agent_approval_required_tiers", "ok", detail))
+
+    try:
+        store = ApprovalStore(_memory_db_path(settings=settings))
+        count = store.count_entries()
+        checks.append(DoctorCheck("agent_approvals_store", "ok", f"{count} persisted approval(s)"))
+    except Exception as exc:
+        checks.append(DoctorCheck("agent_approvals_store", "error", f"Unable to access approvals store: {exc}"))
+    return checks
+
+
+def format_doctor_report(*, settings: config.Settings, include_agent: bool = False) -> str:
+    lines = [
+        "Kage doctor",
+        f"- backend: {settings.llm_backend}",
+        f"- model: {settings.mlx_model}",
+        f"- agent_enabled: {settings.agent_enabled}",
+        f"- second_brain_enabled: {settings.second_brain_enabled}",
+        f"- text_mode_tts_enabled: {settings.text_mode_tts_enabled}",
+        f"- memory_dir: {settings.memory_dir}",
+        "- checks:",
+    ]
+    checks = collect_doctor_checks(settings=settings)
+    if include_agent:
+        checks.extend(collect_agent_doctor_checks(settings=settings))
+    for check in checks:
+        lines.append(f"  - {check.name}: {check.status} ({check.detail})")
+    return "\n".join(lines)
+
+
+def run_doctor(*, settings: config.Settings, include_agent: bool = False) -> None:
+    print(format_doctor_report(settings=settings, include_agent=include_agent))
+
+
+def run_approvals_list(*, settings: config.Settings) -> int:
+    from core.platform.storage import ApprovalStore
+
+    store = ApprovalStore(_memory_db_path(settings=settings))
+    entries = store.list_entries(limit=500)
+    print("Kage approvals")
+    if not entries:
+        print("- none")
+        return 0
+    for entry in entries:
+        print(
+            f"- {entry.approval_key} (by={entry.granted_by}, updated_at={entry.updated_at}, note={entry.note or '-'})"
+        )
+    return 0
+
+
+def run_approvals_grant(
+    *,
+    settings: config.Settings,
+    scope_kind: str,
+    scope_name: str,
+    note: str = "manual_cli",
+) -> int:
+    from core.platform.storage import ApprovalStore
+
+    store = ApprovalStore(_memory_db_path(settings=settings))
+    key = store.grant(
+        scope_kind=scope_kind,
+        scope_name=scope_name,
+        note=note,
+        granted_by="cli",
+    )
+    print(f"Granted approval: {key}")
+    return 0
+
+
+def run_approvals_revoke(*, settings: config.Settings, scope_kind: str, scope_name: str) -> int:
+    from core.platform.storage import ApprovalStore
+
+    store = ApprovalStore(_memory_db_path(settings=settings))
+    removed = store.revoke(scope_kind=scope_kind, scope_name=scope_name)
+    if removed:
+        print(f"Revoked approval: {scope_kind}:{scope_name}")
+    else:
+        print(f"No approval found for: {scope_kind}:{scope_name}")
+    return 0
+
+
+def run_backup_create(*, settings: config.Settings, output: str | None = None) -> int:
+    from core.backup import create_backup
+
+    path = create_backup(
+        settings=settings,
+        output_path=Path(output).expanduser() if output else None,
+    )
+    print(f"Created backup: {path}")
+    return 0
+
+
+def run_backup_verify(*, archive: str) -> int:
+    from core.backup import verify_backup
+
+    ok, lines = verify_backup(Path(archive))
+    for line in lines:
+        print(line)
+    return 0 if ok else 1
+
+
+def run_service_install() -> int:
+    from core.service import install_voice_service
+
+    ok, message = install_voice_service()
+    print(message)
+    return 0 if ok else 1
+
+
+def run_service_uninstall() -> int:
+    from core.service import uninstall_voice_service
+
+    ok, message = uninstall_voice_service()
+    print(message)
+    return 0 if ok else 1
+
+
+def run_service_start() -> int:
+    from core.service import start_voice_service
+
+    ok, message = start_voice_service()
+    print(message)
+    return 0 if ok else 1
+
+
+def run_service_stop() -> int:
+    from core.service import stop_voice_service
+
+    ok, message = stop_voice_service()
+    print(message)
+    return 0 if ok else 1
+
+
+def run_service_status() -> int:
+    from core.service import voice_service_status
+
+    status = voice_service_status()
+    pid_text = str(status.pid) if status.pid is not None else "n/a"
+    print("Kage service status")
+    print(f"- label: {status.label}")
+    print(f"- plist: {status.plist_path}")
+    print(f"- installed: {status.installed}")
+    print(f"- loaded: {status.loaded}")
+    print(f"- pid: {pid_text}")
+    print(f"- detail: {status.detail}")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,7 +391,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     bench = subparsers.add_parser("bench", help="Run inference benchmark without TTS and exit")
     bench.add_argument("--timing", action="store_true", help=argparse.SUPPRESS)
-    subparsers.add_parser("doctor", help="Print environment and dependency diagnostics")
+    doctor = subparsers.add_parser("doctor", help="Print environment and dependency diagnostics")
+    doctor.add_argument("--agent", action="store_true", help="Include agent policy and approval diagnostics")
+
+    approvals = subparsers.add_parser("approvals", help="Manage policy approvals for autonomous actions")
+    approvals_subparsers = approvals.add_subparsers(dest="approvals_command", required=True)
+    approvals_subparsers.add_parser("list", help="List granted approvals")
+    approvals_grant = approvals_subparsers.add_parser("grant", help="Grant approval for a tool or tier")
+    approvals_grant.add_argument("scope_kind", choices=["tool", "tier"], help="Approval scope kind")
+    approvals_grant.add_argument("scope_name", help="Tool name or risk tier")
+    approvals_grant.add_argument("--note", default="manual_cli", help="Optional audit note")
+    approvals_revoke = approvals_subparsers.add_parser("revoke", help="Revoke approval for a tool or tier")
+    approvals_revoke.add_argument("scope_kind", choices=["tool", "tier"], help="Approval scope kind")
+    approvals_revoke.add_argument("scope_name", help="Tool name or risk tier")
+
+    backup = subparsers.add_parser("backup", help="Create or verify local state backups")
+    backup_subparsers = backup.add_subparsers(dest="backup_command", required=True)
+    backup_create = backup_subparsers.add_parser("create", help="Create a compressed local backup archive")
+    backup_create.add_argument("--output", help="Optional output archive path (.tar.gz)")
+    backup_verify = backup_subparsers.add_parser("verify", help="Verify a local backup archive")
+    backup_verify.add_argument("archive", help="Path to the backup archive to verify")
+
+    service = subparsers.add_parser("service", help="Manage launchd voice daemon on macOS")
+    service_subparsers = service.add_subparsers(dest="service_command", required=True)
+    service_subparsers.add_parser("install", help="Install and start the launchd voice service")
+    service_subparsers.add_parser("uninstall", help="Stop and remove the launchd voice service")
+    service_subparsers.add_parser("start", help="Start the installed launchd voice service")
+    service_subparsers.add_parser("stop", help="Stop the launchd voice service")
+    service_subparsers.add_parser("status", help="Show launchd voice service status")
     return parser
 
 
@@ -88,7 +433,7 @@ def normalize_legacy_argv(argv: Sequence[str]) -> list[str]:
     if args[0].startswith("-"):
         # Preserve global argparse behavior for flags like --help.
         return args
-    if args and args[0] in {"chat", "voice", "bench", "doctor"}:
+    if args and args[0] in {"chat", "voice", "bench", "doctor", "approvals", "backup", "service"}:
         return args
     return ["voice", *args]
 
@@ -116,8 +461,46 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "doctor":
-        run_doctor(settings=settings)
+        run_doctor(settings=settings, include_agent=bool(getattr(args, "agent", False)))
         return 0
+
+    if args.command == "approvals":
+        if args.approvals_command == "list":
+            return run_approvals_list(settings=settings)
+        if args.approvals_command == "grant":
+            return run_approvals_grant(
+                settings=settings,
+                scope_kind=args.scope_kind,
+                scope_name=args.scope_name,
+                note=args.note,
+            )
+        if args.approvals_command == "revoke":
+            return run_approvals_revoke(
+                settings=settings,
+                scope_kind=args.scope_kind,
+                scope_name=args.scope_name,
+            )
+        return 0
+
+    if args.command == "backup":
+        if args.backup_command == "create":
+            return run_backup_create(settings=settings, output=getattr(args, "output", None))
+        if args.backup_command == "verify":
+            return run_backup_verify(archive=args.archive)
+        parser.error("backup requires a subcommand")
+
+    if args.command == "service":
+        if args.service_command == "install":
+            return run_service_install()
+        if args.service_command == "uninstall":
+            return run_service_uninstall()
+        if args.service_command == "start":
+            return run_service_start()
+        if args.service_command == "stop":
+            return run_service_stop()
+        if args.service_command == "status":
+            return run_service_status()
+        parser.error("service requires a subcommand")
 
     launch_voice(settings=settings, timing=getattr(args, "timing", False))
     return 0

@@ -421,6 +421,28 @@ class TestPersistExchangeExtractionGating(unittest.TestCase):
         brain._extract_and_store.assert_called_once_with("hello", "ex-1")
 
 
+class TestDirectResponseShortcuts(unittest.TestCase):
+    def test_task_completion_shortcut_persists_without_generation(self) -> None:
+        brain = BrainService.__new__(BrainService)
+        brain.settings = SimpleNamespace()
+        brain._active_context_plan = None
+        brain._notify_status = MagicMock()
+        brain._notify_error = MagicMock()
+        brain._update_policy_state = MagicMock()
+        brain._persist_exchange = MagicMock()
+        brain._deterministic_response = MagicMock(return_value=None)
+        brain._maybe_handle_task_completion = MagicMock(return_value="Marked 'Finish Q1 report' as done.")
+
+        chunks = list(brain.direct_response_stream("I finished the report", text_mode=True, context_plan=None))
+
+        self.assertEqual(chunks, ["Marked 'Finish Q1 report' as done."])
+        brain._persist_exchange.assert_called_once_with(
+            "I finished the report",
+            "Marked 'Finish Q1 report' as done.",
+        )
+        brain._deterministic_response.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Truthfulness guard
 # ---------------------------------------------------------------------------

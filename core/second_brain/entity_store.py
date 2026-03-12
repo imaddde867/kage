@@ -38,6 +38,35 @@ class EntityStore:
         self.db_path = Path(db_path)
         self._store = KnowledgeStore(self.db_path)
 
+    @staticmethod
+    def _normalize_token(text: str) -> str:
+        return " ".join((text or "").strip().lower().split())
+
+    def _merge_candidate(
+        self,
+        kind: str,
+        key: str,
+        value: str,
+        *,
+        source_id: Optional[str],
+    ) -> Entity | None:
+        entity = self.get_by_key(kind, key)
+        if entity is not None:
+            return entity
+
+        normalized_key = self._normalize_token(key)
+        normalized_value = self._normalize_token(value)
+        if not normalized_key and not normalized_value:
+            return None
+
+        allow_value_dedup = source_id is not None or kind in {"profile", "preference"}
+        for candidate in self.get_by_kind(kind, status="active"):
+            if normalized_key and self._normalize_token(candidate.key) == normalized_key:
+                return candidate
+            if allow_value_dedup and normalized_value and self._normalize_token(candidate.value) == normalized_value:
+                return candidate
+        return None
+
     def upsert(
         self,
         kind: str,
@@ -48,13 +77,17 @@ class EntityStore:
         due_date: Optional[str] = None,
         source_id: Optional[str] = None,
     ) -> str:
+        candidate = self._merge_candidate(kind, key, value, source_id=source_id)
+        canonical_key = candidate.key if candidate is not None else key
+        merged_due_date = due_date if due_date is not None else (candidate.due_date if candidate is not None else None)
+        merged_source_id = source_id if source_id is not None else (candidate.source_id if candidate is not None else None)
         return self._store.upsert(
             kind,
-            key,
+            canonical_key,
             value,
             status=status,
-            due_date=due_date,
-            source_id=source_id,
+            due_date=merged_due_date,
+            source_id=merged_source_id,
         )
 
     def get_by_kind(self, kind: str, *, status: str = "active") -> list[Entity]:

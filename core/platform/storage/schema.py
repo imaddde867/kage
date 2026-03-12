@@ -1,15 +1,29 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 
-def connect_db(db_path: Path | str) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path))
+def _configure_connection(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+
+
+@contextmanager
+def connect_db(db_path: Path | str) -> Iterator[sqlite3.Connection]:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        _configure_connection(conn)
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def ensure_schema(db_path: Path | str) -> None:
@@ -83,6 +97,48 @@ def ensure_schema(db_path: Path | str) -> None:
 
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS agent_approvals (
+                approval_key TEXT PRIMARY KEY,
+                scope_kind TEXT NOT NULL,
+                scope_name TEXT NOT NULL,
+                note TEXT,
+                granted_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_approvals_scope ON agent_approvals(scope_kind, scope_name)"
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS autonomy_tasks (
+                id TEXT PRIMARY KEY,
+                task_text TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN (
+                    'planned',
+                    'in_progress',
+                    'blocked',
+                    'awaiting_approval',
+                    'done',
+                    'failed'
+                )),
+                intent_action TEXT NOT NULL,
+                risk_tier TEXT NOT NULL,
+                reason_codes_json TEXT NOT NULL,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_autonomy_tasks_status ON autonomy_tasks(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_autonomy_tasks_updated_at ON autonomy_tasks(updated_at)")
+
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS proactive_opportunities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 kind TEXT NOT NULL,
@@ -134,4 +190,3 @@ def ensure_schema(db_path: Path | str) -> None:
         except sqlite3.OperationalError:
             # Some SQLite builds may not include FTS5 support.
             pass
-

@@ -18,6 +18,21 @@ class SideEffectLevel(str, Enum):
     EXTERNAL_MUTATION = "external_mutation"
 
 
+class RiskTier(str, Enum):
+    SAFE_READ = "safe_read"
+    MODERATE_CHANGE = "moderate_change"
+    HIGH_IMPACT = "high_impact"
+
+
+class TaskStatus(str, Enum):
+    PLANNED = "planned"
+    IN_PROGRESS = "in_progress"
+    BLOCKED = "blocked"
+    AWAITING_APPROVAL = "awaiting_approval"
+    DONE = "done"
+    FAILED = "failed"
+
+
 @dataclass(frozen=True)
 class Request:
     text: str
@@ -51,6 +66,16 @@ class DecisionPlan:
     capability_query: bool = False
     requires_fresh_data: bool = False
     tooling_unavailable: bool = False
+
+
+@dataclass(frozen=True)
+class ExecutionIntent:
+    intent_id: str
+    action: str
+    risk_tier: RiskTier
+    reason_codes: tuple[str, ...]
+    requires_approval: bool = False
+    constraints: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

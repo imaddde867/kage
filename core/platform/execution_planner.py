@@ -16,10 +16,11 @@ Decision logic (in order):
 from __future__ import annotations
 
 from collections.abc import Callable
+import uuid
 
 from core.intent_signals import DEFAULT_SIGNALS
 from core.platform.capability_catalog import CapabilityCatalog
-from core.platform.models import DecisionPlan, Strategy
+from core.platform.models import DecisionPlan, ExecutionIntent, RiskTier, Strategy
 
 _ROUTING_SIGNAL_WEIGHTS: dict[str, float] = {
     "capability_query": -2.0,
@@ -129,3 +130,55 @@ class ExecutionPlanner:
             reason_codes=tuple(reasons),
             requires_fresh_data=False,
         )
+
+    def build_execution_intent(
+        self,
+        *,
+        user_input: str,
+        decision: DecisionPlan,
+        required_approval_tiers: tuple[str, ...] | set[str] = (),
+    ) -> ExecutionIntent:
+        risk_tier = self._intent_risk_tier(user_input=user_input, decision=decision)
+        normalized_required_tiers = {
+            str(value).strip().lower()
+            for value in required_approval_tiers
+            if str(value).strip()
+        }
+        requires_approval = risk_tier.value in normalized_required_tiers
+        return ExecutionIntent(
+            intent_id=f"intent_{uuid.uuid4().hex[:12]}",
+            action="run_agent" if decision.use_agent else "direct_answer",
+            risk_tier=risk_tier,
+            reason_codes=decision.reason_codes,
+            requires_approval=requires_approval,
+            constraints={"fresh_data": decision.requires_fresh_data},
+        )
+
+    def _intent_risk_tier(self, *, user_input: str, decision: DecisionPlan) -> RiskTier:
+        text = (user_input or "").lower()
+        if any(token in text for token in ("shell", "terminal", "command", "bash", "zsh", "powershell")):
+            return RiskTier.HIGH_IMPACT
+        if any(
+            token in text
+            for token in (
+                "calendar",
+                "reminder",
+                "schedule",
+                "appointment",
+                "meeting",
+                "notify",
+                "notification",
+                "mark task",
+                "mark done",
+                "update fact",
+                "forget fact",
+            )
+        ):
+            return RiskTier.MODERATE_CHANGE
+        if decision.use_agent:
+            if any(code in decision.reason_codes for code in ("fresh_data_required", "web_fetch_degraded")):
+                return RiskTier.SAFE_READ
+            if any(code in decision.reason_codes for code in ("calendar_read_degraded",)):
+                return RiskTier.MODERATE_CHANGE
+            return RiskTier.SAFE_READ
+        return RiskTier.SAFE_READ

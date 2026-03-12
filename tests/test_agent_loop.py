@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 import config
 from core.agent.loop import AgentLoop
-from core.agent.tool_base import Tool, ToolResult
+from core.agent.tool_base import Tool, ToolOutcome, ToolResult
 from core.agent.tool_registry import ToolRegistry
 
 
@@ -67,9 +67,9 @@ def _mock_tokenizer() -> Any:
     return tok
 
 
-def _registry(*tools: Tool) -> ToolRegistry:
+def _registry(*tools: Tool, policy_engine: Any | None = None) -> ToolRegistry:
     """Convenience helper — builds a ToolRegistry pre-loaded with the given tools."""
-    r = ToolRegistry()
+    r = ToolRegistry(policy_engine=policy_engine)
     for t in tools:
         r.register(t)
     return r
@@ -191,6 +191,62 @@ class _CountingWebFetchTool(Tool):
         return ToolResult(tool_name=self.name, content=f"URL: {url}\nFetched content.")
 
 
+class _FlakyRetryTool(Tool):
+    name = "flaky_retry"
+    description = "Fails once, then succeeds"
+    parameters: dict[str, Any] = {}
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, **kwargs: Any) -> ToolResult:
+        _ = kwargs
+        self.calls += 1
+        if self.calls == 1:
+            return ToolResult(
+                tool_name=self.name,
+                content="temporary network failure",
+                is_error=True,
+                outcome=ToolOutcome(
+                    status="error",
+                    structured=None,
+                    sources=[],
+                    retryable=True,
+                    side_effects=False,
+                ),
+            )
+        return ToolResult(tool_name=self.name, content="success")
+
+
+class _AlwaysRetryableFailTool(Tool):
+    name = "always_fail_retryable"
+    description = "Always fails with retryable errors"
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {"n": {"type": "integer"}},
+        "required": ["n"],
+    }
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, *, n: int, **kwargs: Any) -> ToolResult:
+        _ = (n, kwargs)
+        self.calls += 1
+        return ToolResult(
+            tool_name=self.name,
+            content="upstream timeout",
+            is_error=True,
+            outcome=ToolOutcome(
+                status="error",
+                structured=None,
+                sources=[],
+                retryable=True,
+                side_effects=False,
+            ),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -265,13 +321,13 @@ class TestAgentLoopToolUse(unittest.TestCase):
       - terminates when max_steps is hit
     """
 
-    def _loop(self, responses: list[str], tools: list[Tool]) -> AgentLoop:
+    def _loop(self, responses: list[str], tools: list[Tool], *, settings: config.Settings | None = None) -> AgentLoop:
         """Create an AgentLoop pre-loaded with the given scripted responses and tools."""
         return AgentLoop(
             runtime=_ScriptedRuntime(responses),
             tokenizer=_mock_tokenizer(),
             registry=_registry(*tools),
-            settings=config.get(),
+            settings=settings or config.get(),
         )
 
     def test_tool_then_answer(self) -> None:
@@ -349,6 +405,22 @@ class TestAgentLoopToolUse(unittest.TestCase):
         result = "".join(loop.run("Loop forever", max_steps=3))
         self.assertIn("step budget", result.lower())
 
+    def test_autonomy_horizon_caps_requested_max_steps(self) -> None:
+        responses = [
+            '<tool>upper</tool>\n<input>{"text":"x1"}</input>',
+            '<tool>upper</tool>\n<input>{"text":"x2"}</input>',
+            '<tool>upper</tool>\n<input>{"text":"x3"}</input>',
+            "<answer>Done after many steps.</answer>",
+        ]
+        settings = replace(
+            config.get(),
+            agent_max_steps=6,
+            agent_autonomy_max_horizon_steps=2,
+        )
+        loop = self._loop(responses, [_UpperTool()], settings=settings)
+        result = "".join(loop.run("Loop forever", max_steps=6))
+        self.assertIn("step budget", result.lower())
+
     def test_multi_step_two_tool_calls(self) -> None:
         """Two consecutive tool calls followed by a final answer — verifies loop continues correctly."""
         responses = [
@@ -405,6 +477,70 @@ class TestAgentLoopToolUse(unittest.TestCase):
         result = "".join(loop.run("Retry fetch with a corrected URL"))
         self.assertIn("All set.", result)
         self.assertEqual(fetch_tool.calls, ["https://example.com:abc", "https://example.com"])
+
+    def test_retryable_tool_error_is_retried_once(self) -> None:
+        responses = [
+            "<tool>flaky_retry</tool><input>{}</input>",
+            "<answer>done</answer>",
+        ]
+        tool = _FlakyRetryTool()
+        settings = replace(
+            config.get(),
+            agent_tool_max_retries=1,
+            agent_tool_retry_backoff_seconds=0.0,
+        )
+        loop = self._loop(responses, [tool], settings=settings)
+        result = "".join(loop.run("run flaky tool"))
+        self.assertEqual(result, "done")
+        self.assertEqual(tool.calls, 2)
+
+    def test_tool_enters_cooldown_after_repeated_failures(self) -> None:
+        responses = [
+            '<tool>always_fail_retryable</tool><input>{"n":1}</input>',
+            '<tool>always_fail_retryable</tool><input>{"n":2}</input>',
+            '<tool>always_fail_retryable</tool><input>{"n":3}</input>',
+            "<answer>finalized</answer>",
+        ]
+        tool = _AlwaysRetryableFailTool()
+        settings = replace(
+            config.get(),
+            agent_tool_max_retries=0,
+            agent_tool_cooldown_failures=2,
+            agent_tool_cooldown_seconds=120.0,
+        )
+        loop = self._loop(responses, [tool], settings=settings)
+        result = "".join(loop.run("keep trying until cooldown kicks in"))
+        self.assertEqual(result, "finalized")
+        self.assertEqual(tool.calls, 2)
+
+    def test_policy_block_sets_run_summary_awaiting_approval(self) -> None:
+        class _PolicyEngine:
+            def evaluate(self, *, tool_name: str, args: dict[str, Any]):
+                _ = (tool_name, args)
+                return type(
+                    "Decision",
+                    (),
+                    {
+                        "allowed": False,
+                        "message": "[POLICY_BLOCK:awaiting_approval] blocked",
+                    },
+                )()
+
+        responses = [
+            '<tool>upper</tool>\n<input>{"text": "hello"}</input>',
+            "<answer>I need approval first.</answer>",
+        ]
+        loop = AgentLoop(
+            runtime=_ScriptedRuntime(responses),
+            tokenizer=_mock_tokenizer(),
+            registry=_registry(_UpperTool(), policy_engine=_PolicyEngine()),
+            settings=config.get(),
+        )
+        result = "".join(loop.run("Uppercase hello"))
+        self.assertEqual(result, "I need approval first.")
+        summary = loop.last_run_summary()
+        self.assertTrue(summary.policy_blocked)
+        self.assertTrue(summary.awaiting_approval)
 
 
 class TestAgentLoopHistoryStructure(unittest.TestCase):
