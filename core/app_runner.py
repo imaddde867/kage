@@ -82,6 +82,18 @@ def _say(text: str, *, coordinator: AudioCoordinator | None = None) -> None:
 def _listen_once(listener: ListenerService, coordinator: AudioCoordinator) -> str:
     coordinator.transition(AudioState.LISTENING)
     coordinator.wait_for_listen_window()
+    if getattr(listener.settings, "stt_streaming_enabled", False):
+        final_text = ""
+        saw_partial = False
+        for partial, is_final in listener.record_with_partial_transcripts():
+            if is_final:
+                final_text = partial.strip()
+                continue
+            saw_partial = True
+            print(f"\r[You ~]: {partial}", end="", flush=True)
+        if saw_partial:
+            print()
+        return final_text
     audio = listener.record_until_silence()
     return listener.transcribe(audio).strip()
 
@@ -201,6 +213,10 @@ def run_voice(settings: config.Settings, timing: bool = False) -> None:
     if getattr(settings, "heartbeat_enabled", True):
         from core.agent.heartbeat import HeartbeatAgent
         HeartbeatAgent(brain, coordinator, settings).start()
+
+    if getattr(settings, "cron_enabled", False):
+        from core.agent.cron_daemon import CronDaemon
+        CronDaemon(brain, coordinator, settings).start()
 
     print(f"  Kage online. Say '{settings.wake_word.title()}' to activate.\n")
 

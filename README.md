@@ -5,6 +5,14 @@
 
 Kage is a fully local personal AI for macOS. Say the wake word, it listens, reasons locally, and responds aloud. No cloud inference, no subscriptions, no data leaving your machine.
 
+Kage is intentionally narrow:
+- single-user
+- macOS-first
+- voice-first
+- private-by-default
+
+Kage is intentionally not a multi-channel assistant platform. It does not aim to be a WhatsApp/Telegram/Slack/Discord gateway, a browser automation framework, or a remote multi-device control plane.
+
 ## How it works
 
 ```
@@ -49,6 +57,17 @@ kage chat --plain  # plain terminal fallback
 kage voice         # voice mode (wake word → listen → respond aloud)
 kage bench         # run an inference benchmark and exit
 kage doctor        # check environment and dependency status
+kage doctor --agent # include policy + approvals diagnostics
+kage approvals list
+kage approvals grant tool shell
+kage approvals revoke tool shell
+kage backup create # create a compressed local backup (.env + memory)
+kage backup verify output/kage-backup-*.tar.gz
+kage service install   # install + start launchd voice daemon (macOS)
+kage service status    # inspect launchd daemon status
+kage service stop      # stop daemon
+kage service start     # start daemon
+kage service uninstall # remove daemon + plist
 ```
 
 Legacy shims still work: `python main.py --text` → chat, `python main.py` → voice.
@@ -87,6 +106,8 @@ The 4B is the default — same quality as 9B for conversational use, 2.4× faste
 | `WAKE_WORD_THRESHOLD` | `0.5` | Detection confidence threshold |
 | `STT_BACKEND` | `apple` | `apple` or `whisper` |
 | `WHISPER_MODEL` | `base` | Only used when `STT_BACKEND=whisper` |
+| `STT_STREAMING_ENABLED` | `false` | Emit partial transcripts while listening (voice mode) |
+| `STT_STREAM_INTERVAL_SECONDS` | `0.8` | Interval between partial transcript updates |
 | `KOKORO_VOICE` | `af_heart` | Voice preset (`bf_emma`, `bm_george`, etc.) |
 | `KOKORO_SPEED` | `1.0` | Speech rate multiplier |
 | `KOKORO_LANG_CODE` | `en-us` | Language/accent (`en-gb`, `ja`, `zh`) |
@@ -105,6 +126,11 @@ The 4B is the default — same quality as 9B for conversational use, 2.4× faste
 |---|---|---|
 | `AGENT_ENABLED` | `false` | Enable tool-using agent loop |
 | `AGENT_MAX_STEPS` | `8` | Max tool steps per request |
+| `AGENT_TOOL_MAX_RETRIES` | `1` | Retry count for retryable tool failures |
+| `AGENT_TOOL_COOLDOWN_SECONDS` | `15` | Temporary per-tool cooldown after repeated failures |
+| `AGENT_POLICY_MODE` | `strict` | Policy mode: `strict`, `hybrid`, or `owner_fast` |
+| `AGENT_APPROVAL_REQUIRED_TIERS` | `moderate_change,high_impact` | Risk tiers requiring approval in policy mode |
+| `AGENT_REFLECTION_ENABLED` | `true` | Adds failure reflection hints after tool errors |
 | `SECOND_BRAIN_ENABLED` | `false` | Enable structured entity memory (tasks, facts, preferences) |
 | `EXTRACTION_ENABLED` | `false` | Extract entities from each conversation turn |
 | `HEARTBEAT_ENABLED` | `false` | Proactive reminders daemon (voice mode only) |
@@ -129,8 +155,9 @@ See `.env.example` for the full list including audio tuning, barge-in, TLS, and 
 | `mark_task_done` | Mark a second-brain task as complete |
 | `update_fact` | Update a stored fact or preference |
 | `list_open_tasks` | List active tasks from second-brain memory |
+| `forget_fact` | Remove a stored fact or preference from memory |
 
-Calendar, Reminders, and notifications require macOS and AppleScript/Accessibility permissions. `shell` blocks all write operations and pipes by default.
+Calendar, Reminders, and notifications require macOS and AppleScript/Accessibility permissions. `shell` blocks all write operations and pipes by default. In strict mode, moderate/high-risk tools require explicit approval grants.
 
 ## Architecture
 
@@ -168,7 +195,7 @@ Key files:
 ~/micromamba/envs/kage/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-273 tests. No external services required — all connectors are mocked.
+293 tests. No external services required — all connectors are mocked.
 
 Quick sanity checks:
 
@@ -181,6 +208,10 @@ python -c "import config; s = config.get(); print('agent:', s.agent_enabled, '| 
 
 # Inspect stored entities
 sqlite3 data/memory/kage_memory.db "SELECT kind, key, value, status FROM entities;"
+
+# Create and verify a local backup
+kage backup create
+kage backup verify output/kage-backup-YYYYMMDD-HHMMSS.tar.gz
 ```
 
 ## Roadmap
@@ -193,12 +224,12 @@ Done:
 - [x] Textual chat UI with session management
 
 Near-term:
-- [ ] Task completion detection — reliably call `mark_task_done` on "done / finished" phrases
-- [ ] Agent reliability pass — handle tool timeouts and failures gracefully
-- [ ] Entity dedup — merge conflicting facts instead of stacking them
-- [ ] Source attribution — include URL snippets when web results inform a response
+- [x] Task completion detection — reliably call `mark_task_done` on "done / finished" phrases
+- [x] Agent reliability pass — handle tool timeouts and failures gracefully
+- [x] Entity dedup — merge conflicting facts instead of stacking them
+- [x] Source attribution — include source URLs when web results inform a response
 
 Later:
-- [ ] Streaming STT — partial transcript during speech for lower turn latency
+- [x] Streaming STT — partial transcript during speech for lower turn latency
 - [ ] Token-aware context budgeting across turns, memory, and entity recall
 - [ ] User-trained wake word support

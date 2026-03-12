@@ -78,6 +78,32 @@ class EntityStoreTests(unittest.TestCase):
         self.assertIn("an active task", result)
         self.assertNotIn("a finished task", result)
 
+    def test_upsert_merges_duplicate_value_with_different_key(self) -> None:
+        store = self._store()
+        eid1 = store.upsert("task", "report_a", "Finish Q1 report", source_id="turn-1")
+        eid2 = store.upsert("task", "report_b", "Finish Q1 report", source_id="turn-2")
+        self.assertEqual(eid1, eid2)
+        active = store.get_by_kind("task", status="active")
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0].source_id, "turn-2")
+
+    def test_manual_task_upserts_with_same_value_but_different_keys_remain_distinct(self) -> None:
+        store = self._store()
+        eid1 = store.upsert("task", "report_a", "Finish Q1 report")
+        eid2 = store.upsert("task", "report_b", "Finish Q1 report")
+        self.assertNotEqual(eid1, eid2)
+        active = store.get_by_kind("task", status="active")
+        self.assertEqual(len(active), 2)
+
+    def test_upsert_preserves_due_date_when_follow_up_update_omits_it(self) -> None:
+        store = self._store()
+        eid = store.upsert("commitment", "dentist", "Dentist appointment", due_date="2026-03-20")
+        eid_again = store.upsert("commitment", "dentist", "Dentist appointment confirmed")
+        self.assertEqual(eid, eid_again)
+        entity = store.get_by_key("commitment", "dentist")
+        assert entity is not None
+        self.assertEqual(entity.due_date, "2026-03-20")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -92,11 +92,28 @@ class RequestOrchestrator:
             if callable(report_status):
                 report_status("checking_tools", detail="Using connectors to gather evidence")
             context = runtime.agent_context(request.text, context_plan)
+            required_tiers = ()
+            required_tiers_fn = getattr(runtime, "required_approval_tiers", None)
+            if callable(required_tiers_fn):
+                try:
+                    required_tiers = tuple(required_tiers_fn())
+                except Exception:
+                    required_tiers = ()
+            intent = self._execution_planner.build_execution_intent(
+                user_input=request.text,
+                decision=decision,
+                required_approval_tiers=required_tiers,
+            )
+            summary_getter = getattr(runtime, "agent_run_summary", None)
+            if not callable(summary_getter):
+                summary_getter = None
             parts: list[str] = []
             for chunk in self._action_executor.run_agent(
                 task=request.text,
                 entity_context=context,
                 agent_runner=runtime.agent_runner,
+                intent=intent,
+                agent_summary_getter=summary_getter,
             ):
                 parts.append(chunk)
                 yield chunk

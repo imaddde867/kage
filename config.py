@@ -76,6 +76,9 @@ class Settings:
     # STT
     stt_backend: str
     whisper_model: str
+    stt_streaming_enabled: bool
+    stt_stream_interval_seconds: float
+    stt_stream_min_chars: int
 
     # TTS
     kokoro_model: str
@@ -131,6 +134,14 @@ class Settings:
     agent_entity_mode: str          # AGENT_ENTITY_MODE — personal_only | relevance_filtered | full
     agent_history_char_budget: int  # AGENT_HISTORY_CHAR_BUDGET — max chars retained in loop history
     agent_observation_max_chars: int # AGENT_OBSERVATION_MAX_CHARS — per-observation compression cap
+    agent_tool_max_retries: int     # AGENT_TOOL_MAX_RETRIES — retries for retryable tool failures
+    agent_tool_retry_backoff_seconds: float  # AGENT_TOOL_RETRY_BACKOFF_SECONDS — exponential backoff base
+    agent_tool_cooldown_failures: int  # AGENT_TOOL_COOLDOWN_FAILURES — failures before temporary tool cooldown
+    agent_tool_cooldown_seconds: float  # AGENT_TOOL_COOLDOWN_SECONDS — cooldown duration per tool
+    agent_policy_mode: str         # AGENT_POLICY_MODE — strict | hybrid | owner_fast
+    agent_approval_required_tiers: tuple[str, ...]  # AGENT_APPROVAL_REQUIRED_TIERS — CSV of tiers requiring approval
+    agent_autonomy_max_horizon_steps: int  # AGENT_AUTONOMY_MAX_HORIZON_STEPS — cap for long-running autonomous task plans
+    agent_reflection_enabled: bool  # AGENT_REFLECTION_ENABLED — append failure reflections into tool observations
 
     # Heartbeat — proactive background daemon (core/agent/heartbeat.py).
     # A daemon thread wakes every heartbeat_interval_seconds, scans EntityStore for
@@ -162,6 +173,13 @@ class Settings:
     # considering insecure fallback.
     web_fetch_tls_retry_with_certifi: bool
 
+    # Cron daemon — fires scheduled reminders stored via ScheduleReminderTool.
+    # A daemon thread polls EntityStore every cron_poll_interval_seconds and
+    # speaks any reminder whose due_date has passed.
+    # Requires SECOND_BRAIN_ENABLED=true to have an active EntityStore.
+    cron_enabled: bool              # CRON_ENABLED — starts CronDaemon on voice mode startup
+    cron_poll_interval_seconds: int # CRON_POLL_INTERVAL_SECONDS — seconds between polls
+
     # Calendar connector runtime tuning.
     calendar_read_timeout_seconds: int
     calendar_read_retry_count: int
@@ -181,6 +199,9 @@ def get() -> Settings:
         wake_word_threshold=_env_float("WAKE_WORD_THRESHOLD", 0.5),
         stt_backend=_env_str("STT_BACKEND", "apple"),
         whisper_model=_env_str("WHISPER_MODEL", "base"),
+        stt_streaming_enabled=_env_bool("STT_STREAMING_ENABLED", False),
+        stt_stream_interval_seconds=max(0.2, _env_float("STT_STREAM_INTERVAL_SECONDS", 0.8)),
+        stt_stream_min_chars=max(0, _env_int("STT_STREAM_MIN_CHARS", 6)),
         kokoro_model=_env_str("KOKORO_MODEL", "mlx-community/Kokoro-82M-bf16"),
         kokoro_voice=_env_str("KOKORO_VOICE", "af_heart"),
         kokoro_speed=_env_float("KOKORO_SPEED", 1.0),
@@ -218,6 +239,17 @@ def get() -> Settings:
         agent_entity_mode=_env_str("AGENT_ENTITY_MODE", "relevance_filtered"),
         agent_history_char_budget=max(1000, _env_int("AGENT_HISTORY_CHAR_BUDGET", 8000)),
         agent_observation_max_chars=max(500, _env_int("AGENT_OBSERVATION_MAX_CHARS", 1800)),
+        agent_tool_max_retries=max(0, _env_int("AGENT_TOOL_MAX_RETRIES", 1)),
+        agent_tool_retry_backoff_seconds=max(0.0, _env_float("AGENT_TOOL_RETRY_BACKOFF_SECONDS", 0.25)),
+        agent_tool_cooldown_failures=max(1, _env_int("AGENT_TOOL_COOLDOWN_FAILURES", 2)),
+        agent_tool_cooldown_seconds=max(0.0, _env_float("AGENT_TOOL_COOLDOWN_SECONDS", 15.0)),
+        agent_policy_mode=_env_str("AGENT_POLICY_MODE", "strict"),
+        agent_approval_required_tiers=_env_csv(
+            "AGENT_APPROVAL_REQUIRED_TIERS",
+            ("moderate_change", "high_impact"),
+        ),
+        agent_autonomy_max_horizon_steps=max(1, _env_int("AGENT_AUTONOMY_MAX_HORIZON_STEPS", 24)),
+        agent_reflection_enabled=_env_bool("AGENT_REFLECTION_ENABLED", True),
         heartbeat_enabled=_env_bool("HEARTBEAT_ENABLED", False),
         heartbeat_interval_seconds=_env_int("HEARTBEAT_INTERVAL_SECONDS", 300),
         dnd_start_hour=_env_int("DND_START_HOUR", 23),
@@ -230,6 +262,8 @@ def get() -> Settings:
             (),
         ),
         web_fetch_tls_retry_with_certifi=_env_bool("WEB_FETCH_TLS_RETRY_WITH_CERTIFI", True),
+        cron_enabled=_env_bool("CRON_ENABLED", False),
+        cron_poll_interval_seconds=max(10, _env_int("CRON_POLL_INTERVAL_SECONDS", 60)),
         calendar_read_timeout_seconds=max(1, _env_int("CALENDAR_READ_TIMEOUT_SECONDS", 10)),
         calendar_read_retry_count=max(0, _env_int("CALENDAR_READ_RETRY_COUNT", 1)),
         calendar_read_retry_delay_seconds=max(0.0, _env_float("CALENDAR_READ_RETRY_DELAY_SECONDS", 0.4)),

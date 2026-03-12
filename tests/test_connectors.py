@@ -27,7 +27,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from connectors.memory_ops import ListOpenTasksTool, MarkTaskDoneTool, UpdateFactTool
+from connectors.memory_ops import (
+    ListOpenTasksTool,
+    MarkTaskDoneTool,
+    UpdateFactTool,
+    auto_mark_task_done_from_text,
+)
 from connectors.notify import NotifyTool, SpeakTool, _escape_as
 from connectors.shell import ShellTool
 from connectors.web_search import WebSearchTool
@@ -495,6 +500,28 @@ class TestMemoryOpTools(unittest.TestCase):
         result = self.mark.execute(key="nonexistent task")
         self.assertTrue(result.is_error)
         self.assertIn("nonexistent task", result.content)
+
+    def test_auto_mark_done_from_explicit_phrase(self) -> None:
+        self.update.execute(kind="task", key="report", value="Finish Q1 report")
+        result = auto_mark_task_done_from_text(self._db, "I finished the Q1 report.")
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn("Finish Q1 report", result.content)
+        listed = self.list_tasks.execute()
+        self.assertNotIn("Finish Q1 report", listed.content)
+
+    def test_auto_mark_done_single_active_task_handles_bare_done(self) -> None:
+        self.update.execute(kind="task", key="report", value="Finish Q1 report")
+        result = auto_mark_task_done_from_text(self._db, "done")
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn("Finish Q1 report", result.content)
+
+    def test_auto_mark_done_bare_done_is_conservative_when_multiple_tasks_exist(self) -> None:
+        self.update.execute(kind="task", key="report", value="Finish Q1 report")
+        self.update.execute(kind="task", key="deck", value="Ship board deck")
+        result = auto_mark_task_done_from_text(self._db, "done")
+        self.assertIsNone(result)
 
     def test_update_multiple_kinds(self) -> None:
         """profile and preference entities also appear in the list output."""

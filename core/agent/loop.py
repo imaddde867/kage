@@ -126,6 +126,8 @@ _INTERNAL_TAG_TOKEN_RE = re.compile(r"</?(?:thought|tool|input)\b[^>]*>", re.IGN
 class _LoopRunState:
     history: list[tuple[str, str]] = field(default_factory=list)
     tool_call_counts: Counter[tuple[str, str]] = field(default_factory=Counter)
+    tool_failures: dict[str, int] = field(default_factory=dict)
+    tool_cooldowns: dict[str, float] = field(default_factory=dict)
     tools_used: set[str] = field(default_factory=set)
     fetched_urls: set[str] = field(default_factory=set)
     checked_urls: list[str] = field(default_factory=list)
@@ -137,6 +139,19 @@ class _LoopRunState:
     total_prompt_chars: int = 0
     web_attempts: int = 0
     web_successes: int = 0
+    policy_blocked: bool = False
+    awaiting_approval: bool = False
+    failed: bool = False
+
+
+@dataclass(frozen=True)
+class AgentRunSummary:
+    had_output: bool
+    policy_blocked: bool
+    awaiting_approval: bool
+    failed: bool
+    steps: int
+    tool_calls: int
 
 
 class AgentLoop:
@@ -163,6 +178,27 @@ class AgentLoop:
         self._tokenizer = tokenizer
         self._registry = registry
         self._settings = settings
+        self._last_run_summary = AgentRunSummary(
+            had_output=False,
+            policy_blocked=False,
+            awaiting_approval=False,
+            failed=False,
+            steps=0,
+            tool_calls=0,
+        )
+
+    def last_run_summary(self) -> AgentRunSummary:
+        return self._last_run_summary
+
+    def _set_last_run_summary(self, *, state: _LoopRunState, had_output: bool, steps: int, failed: bool) -> None:
+        self._last_run_summary = AgentRunSummary(
+            had_output=had_output,
+            policy_blocked=state.policy_blocked,
+            awaiting_approval=state.awaiting_approval,
+            failed=failed,
+            steps=max(0, int(steps)),
+            tool_calls=max(0, int(state.tool_calls)),
+        )
 
     # ------------------------------------------------------------------
     # Prompt construction
@@ -437,6 +473,98 @@ class AgentLoop:
             for url in urls:
                 self._append_unique_url(url, keys=state.source_url_keys, values=state.source_urls)
 
+    def _tool_cooldown_remaining(self, *, state: _LoopRunState, tool_name: str) -> float:
+        deadline = state.tool_cooldowns.get(tool_name, 0.0)
+        if deadline <= 0.0:
+            return 0.0
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            state.tool_cooldowns.pop(tool_name, None)
+            return 0.0
+        return remaining
+
+    def _execute_tool_with_retries(self, tool_call: Any) -> tuple[Any, int]:
+        max_retries = max(0, int(getattr(self._settings, "agent_tool_max_retries", 1)))
+        backoff_base = max(0.0, float(getattr(self._settings, "agent_tool_retry_backoff_seconds", 0.25)))
+        max_attempts = 1 + max_retries
+
+        result = None
+        for attempt in range(max_attempts):
+            result = self._registry.execute(tool_call)
+            if not result.is_error:
+                return result, attempt + 1
+
+            retryable = self._is_retryable_tool_error(result)
+            if not retryable or attempt + 1 >= max_attempts:
+                return result, attempt + 1
+
+            delay = backoff_base * (2**attempt)
+            if delay > 0:
+                time.sleep(delay)
+
+        assert result is not None
+        return result, max_attempts
+
+    def _is_retryable_tool_error(self, result: Any) -> bool:
+        if result.outcome is not None and not result.outcome.retryable:
+            return False
+        text = str(result.content or "").lower()
+        fatal_markers = (
+            "requires:",
+            "expects a json object",
+            "unknown tool",
+            "malformed tool output",
+            "invalid arguments for",
+        )
+        return not any(marker in text for marker in fatal_markers)
+
+    def _record_tool_result_state(
+        self,
+        *,
+        state: _LoopRunState,
+        result: Any,
+        attempts: int,
+    ) -> str:
+        tool_name = result.tool_name
+        if not result.is_error:
+            state.tool_failures.pop(tool_name, None)
+            if attempts > 1:
+                return f"{result.content}\n\nRecovered after {attempts - 1} retry attempt(s)."
+            return result.content
+
+        failures = state.tool_failures.get(tool_name, 0) + 1
+        state.tool_failures[tool_name] = failures
+        retry_info = f" (after {attempts} attempts)" if attempts > 1 else ""
+        content = f"{result.content}{retry_info}"
+
+        cooldown_after = max(1, int(getattr(self._settings, "agent_tool_cooldown_failures", 2)))
+        cooldown_seconds = max(0.0, float(getattr(self._settings, "agent_tool_cooldown_seconds", 15.0)))
+        if failures >= cooldown_after and cooldown_seconds > 0:
+            state.tool_cooldowns[tool_name] = time.monotonic() + cooldown_seconds
+            return (
+                f"{content}\n\nTool '{tool_name}' failed {failures} times in a row; "
+                f"cooling down for {cooldown_seconds:.0f}s."
+            )
+        return content
+
+    def _reflection_for_tool_failure(self, *, tool_name: str, content: str) -> str:
+        lowered = content.lower()
+        if "awaiting_approval" in lowered or "policy_block" in lowered:
+            return (
+                f"Reflection: '{tool_name}' is blocked by policy. Ask for approval or continue with lower-risk tools."
+            )
+        if "timed out" in lowered or "timeout" in lowered:
+            return (
+                f"Reflection: '{tool_name}' timed out. Retry with narrower inputs or switch to a backup tool."
+            )
+        if "unknown tool" in lowered or "invalid arguments" in lowered:
+            return (
+                f"Reflection: '{tool_name}' call format is wrong. Correct arguments before retrying."
+            )
+        return (
+            f"Reflection: '{tool_name}' failed. Try an alternate strategy or finalize with evidence collected so far."
+        )
+
     def _answer_with_guards(
         self,
         *,
@@ -489,6 +617,7 @@ class AgentLoop:
         state: _LoopRunState,
     ) -> str | None:
         logger.debug("Tool call: %s(%s)", tool_call.name, tool_call.args)
+        canonical_name = self._registry.canonical_name(tool_call.name)
         call_key = self._tool_call_key(tool_call.name, tool_call.args)
         state.tool_call_counts[call_key] += 1
         if state.tool_call_counts[call_key] >= 3:
@@ -503,7 +632,20 @@ class AgentLoop:
                 "I don't have a reliable answer for that right now."
             )
 
-        if tool_call.name == "web_fetch":
+        remaining_cooldown = self._tool_cooldown_remaining(state=state, tool_name=canonical_name)
+        if remaining_cooldown > 0:
+            self._append_history(
+                state.history,
+                raw,
+                canonical_name,
+                (
+                    f"Tool '{canonical_name}' is cooling down for {remaining_cooldown:.1f}s after repeated failures. "
+                    "Use another tool or finalize with current evidence."
+                ),
+            )
+            return None
+
+        if canonical_name == "web_fetch":
             raw_fetch_url = str(tool_call.args.get("url", "")).strip()
             fetch_url = self._canonical_web_url(raw_fetch_url)
             if fetch_url and fetch_url in state.fetched_urls:
@@ -527,13 +669,30 @@ class AgentLoop:
                 state.fetched_urls.add(fetch_url)
             state.fetch_count += 1
 
-        result = self._registry.execute(tool_call)
-        state.tool_calls += 1
+        result, attempts = self._execute_tool_with_retries(tool_call)
+        state.tool_calls += attempts
         state.tools_used.add(result.tool_name)
+        outcome_status = str(getattr(getattr(result, "outcome", None), "status", "")).strip().lower()
+        result_text = str(result.content or "").lower()
+        if outcome_status == "blocked" or "[policy_block:" in result_text:
+            state.policy_blocked = True
+        if "awaiting_approval" in result_text:
+            state.awaiting_approval = True
         if result.tool_name in {"web_search", "web_fetch"}:
             self._record_web_result(state=state, result=result)
+        content_for_history = self._record_tool_result_state(
+            state=state,
+            result=result,
+            attempts=attempts,
+        )
+        if result.is_error and bool(getattr(self._settings, "agent_reflection_enabled", True)):
+            reflection = self._reflection_for_tool_failure(
+                tool_name=result.tool_name,
+                content=content_for_history,
+            )
+            content_for_history = f"{content_for_history}\n\n{reflection}"
         logger.debug("Tool result (error=%s): %s", result.is_error, result.content[:200])
-        self._append_history(state.history, raw, result.tool_name, result.content)
+        self._append_history(state.history, raw, result.tool_name, content_for_history)
         return None
 
     def _handle_plain_response(self, *, raw: str, task: str, state: _LoopRunState) -> str | None:
@@ -638,98 +797,151 @@ class AgentLoop:
         Yields:
             String chunks of the final answer, or a cap-exceeded message.
         """
+        configured_steps = max(1, int(getattr(self._settings, "agent_max_steps", 8)))
+        horizon_cap = max(
+            1,
+            int(getattr(self._settings, "agent_autonomy_max_horizon_steps", configured_steps)),
+        )
         if max_steps is None:
-            max_steps = self._settings.agent_max_steps
+            max_steps = configured_steps
+        max_steps = max(1, min(int(max_steps), horizon_cap))
 
         started_at = time.perf_counter()
         system = self._system_prompt(entity_context=context, max_steps=max_steps)
         state = _LoopRunState()
+        self._set_last_run_summary(state=state, had_output=False, steps=0, failed=False)
 
-        for step_num in range(max_steps):
-            logger.debug("AgentLoop step %d/%d", step_num + 1, max_steps)
-            prompt = self._build_prompt(system, task, state.history)
-            state.total_prompt_chars += len(prompt)
-            logger.debug(
-                "AgentLoop metrics step=%d prompt_chars=%d history_chars=%d tool_calls=%d web_fetches=%d",
-                step_num + 1,
-                len(prompt),
-                self._history_chars(state.history),
-                state.tool_calls,
-                state.fetch_count,
-            )
-            raw = self._generate(prompt)
-            parsed = parse_step(raw)
-
-            if parsed.thought:
-                logger.debug("Thought: %s", parsed.thought)
-
-            # --- Final answer: yield and exit ---
-            if parsed.answer is not None:
-                answer = self._handle_parsed_answer(
-                    parsed_answer=parsed.answer,
-                    raw=raw,
-                    task=task,
-                    state=state,
-                )
-                if answer is None:
-                    continue
+        try:
+            for step_num in range(max_steps):
+                logger.debug("AgentLoop step %d/%d", step_num + 1, max_steps)
+                prompt = self._build_prompt(system, task, state.history)
+                state.total_prompt_chars += len(prompt)
                 logger.debug(
-                    "AgentLoop completed in %.0fms (steps=%d tool_calls=%d web_fetches=%d total_prompt_chars=%d)",
-                    (time.perf_counter() - started_at) * 1000,
+                    "AgentLoop metrics step=%d prompt_chars=%d history_chars=%d tool_calls=%d web_fetches=%d",
                     step_num + 1,
+                    len(prompt),
+                    self._history_chars(state.history),
                     state.tool_calls,
                     state.fetch_count,
-                    state.total_prompt_chars,
                 )
-                yield answer
-                return
+                raw = self._generate(prompt)
+                parsed = parse_step(raw)
 
-            # --- Tool call: execute, record observation, loop again ---
-            if parsed.tool_call is not None:
-                bail = self._handle_tool_call(tool_call=parsed.tool_call, raw=raw, state=state)
-                if bail is not None:
-                    yield bail
+                if parsed.thought:
+                    logger.debug("Thought: %s", parsed.thought)
+
+                # --- Final answer: yield and exit ---
+                if parsed.answer is not None:
+                    answer = self._handle_parsed_answer(
+                        parsed_answer=parsed.answer,
+                        raw=raw,
+                        task=task,
+                        state=state,
+                    )
+                    if answer is None:
+                        continue
+                    logger.debug(
+                        "AgentLoop completed in %.0fms (steps=%d tool_calls=%d web_fetches=%d total_prompt_chars=%d)",
+                        (time.perf_counter() - started_at) * 1000,
+                        step_num + 1,
+                        state.tool_calls,
+                        state.fetch_count,
+                        state.total_prompt_chars,
+                    )
+                    self._set_last_run_summary(
+                        state=state,
+                        had_output=True,
+                        steps=step_num + 1,
+                        failed=False,
+                    )
+                    yield answer
                     return
-                continue
 
-            # --- No XML tags: treat raw text as a plain answer ---
-            # Some model responses (especially for simple tasks) skip the
-            # XML format entirely.  Accept them rather than forcing a retry.
-            if raw.strip():
-                answer = self._handle_plain_response(raw=raw, task=task, state=state)
-                if answer is None:
+                # --- Tool call: execute, record observation, loop again ---
+                if parsed.tool_call is not None:
+                    bail = self._handle_tool_call(tool_call=parsed.tool_call, raw=raw, state=state)
+                    if bail is not None:
+                        state.failed = True
+                        self._set_last_run_summary(
+                            state=state,
+                            had_output=True,
+                            steps=step_num + 1,
+                            failed=True,
+                        )
+                        yield bail
+                        return
                     continue
-                logger.debug(
-                    "AgentLoop plain-text completion in %.0fms (steps=%d tool_calls=%d total_prompt_chars=%d)",
-                    (time.perf_counter() - started_at) * 1000,
-                    step_num + 1,
-                    state.tool_calls,
-                    state.total_prompt_chars,
+
+                # --- No XML tags: treat raw text as a plain answer ---
+                # Some model responses (especially for simple tasks) skip the
+                # XML format entirely.  Accept them rather than forcing a retry.
+                if raw.strip():
+                    answer = self._handle_plain_response(raw=raw, task=task, state=state)
+                    if answer is None:
+                        continue
+                    logger.debug(
+                        "AgentLoop plain-text completion in %.0fms (steps=%d tool_calls=%d total_prompt_chars=%d)",
+                        (time.perf_counter() - started_at) * 1000,
+                        step_num + 1,
+                        state.tool_calls,
+                        state.total_prompt_chars,
+                    )
+                    self._set_last_run_summary(
+                        state=state,
+                        had_output=True,
+                        steps=step_num + 1,
+                        failed=False,
+                    )
+                    yield answer
+                    return
+
+            # Exhausted all steps without a final answer: force one finalization pass.
+            if state.history:
+                logger.debug("AgentLoop max-steps reached — attempting forced finalization")
+                final = self._forced_finalize_answer(
+                    task=task,
+                    history=state.history,
+                    tools_used=state.tools_used,
+                    source_urls=state.source_urls,
+                    checked_urls=state.checked_urls,
+                    web_attempts=state.web_attempts,
+                    web_successes=state.web_successes,
                 )
-                yield answer
+                failed = "step budget" in final.lower() or "couldn't produce a final answer" in final.lower()
+                state.failed = failed
+                self._set_last_run_summary(
+                    state=state,
+                    had_output=True,
+                    steps=max_steps,
+                    failed=failed,
+                )
+                yield final
                 return
 
-        # Exhausted all steps without a final answer: force one finalization pass.
-        if state.history:
-            logger.debug("AgentLoop max-steps reached — attempting forced finalization")
-            yield self._forced_finalize_answer(
-                task=task,
-                history=state.history,
-                tools_used=state.tools_used,
-                source_urls=state.source_urls,
-                checked_urls=state.checked_urls,
-                web_attempts=state.web_attempts,
-                web_successes=state.web_successes,
+            # No history at all (e.g. empty model outputs each step): graceful cap.
+            logger.debug(
+                "AgentLoop hit max steps in %.0fms (max_steps=%d tool_calls=%d web_fetches=%d total_prompt_chars=%d)",
+                (time.perf_counter() - started_at) * 1000,
+                max_steps,
+                state.tool_calls,
+                state.fetch_count,
+                state.total_prompt_chars,
             )
-            return
-
-        # No history at all (e.g. empty model outputs each step): graceful cap.
-        logger.debug(
-            "AgentLoop hit max steps in %.0fms (max_steps=%d tool_calls=%d web_fetches=%d total_prompt_chars=%d)",
-            (time.perf_counter() - started_at) * 1000,
-            max_steps,
-            state.tool_calls,
-            state.fetch_count,
-            state.total_prompt_chars,
-        )
-        yield "I reached the step limit without a final answer. Please try rephrasing your request."
+            state.failed = True
+            cap = "I reached the step limit without a final answer. Please try rephrasing your request."
+            self._set_last_run_summary(
+                state=state,
+                had_output=True,
+                steps=max_steps,
+                failed=True,
+            )
+            yield cap
+        except Exception:
+            state.failed = True
+            self._set_last_run_summary(
+                state=state,
+                had_output=False,
+                steps=0,
+                failed=True,
+            )
+            raise

@@ -37,13 +37,15 @@ from core.brain_prompting import (
 from core.intent_signals import DEFAULT_SIGNALS
 from core.memory import MemoryStore
 from core.platform import (
+    ActionExecutor,
     ContextPlanner,
     ExecutionPlanner,
+    PolicyEngine,
     ProactivePolicyEngine,
     Request,
     RequestOrchestrator,
 )
-from core.platform.storage import EvidenceStore, TraceStore
+from core.platform.storage import ApprovalStore, AutonomyTaskStore, EvidenceStore, TraceStore
 from core.runtime_events import RuntimeObserver, StatusUpdate
 
 logger = logging.getLogger(__name__)
@@ -76,10 +78,15 @@ _TOOL_CATEGORY_BY_NAME: dict[str, str] = {
     "mark_task_done": "memory",
     "update_fact": "memory",
     "list_open_tasks": "memory",
+    "forget_fact": "memory",
+    "schedule_reminder": "memory",
+    "list_scheduled_reminders": "memory",
+    "cancel_reminder": "memory",
     "shell": "local",
     "shell_mutation": "local",
     "web_search": "web",
     "web_fetch": "web",
+    "browser_fetch": "web",
     "notify": "external action",
     "speak": "external action",
     "calendar_read": "external action",
@@ -94,18 +101,26 @@ class BrainService:
         self.memory = memory or MemoryStore()
         self._trace_store = TraceStore(self.memory.db_path)
         self._evidence_store = EvidenceStore(self.memory.db_path)
+        self._approval_store = ApprovalStore(self.memory.db_path)
+        self._task_store = AutonomyTaskStore(self.memory.db_path)
         self._recent_turns: deque[tuple[str, str]] = deque(maxlen=max(0, self.settings.recent_turns))
         self._prefers_honesty = False
         self._prefers_forced_yes = False
         self._execution_planner = ExecutionPlanner()
         self._context_planner = ContextPlanner()
         self._proactive_policy = ProactivePolicyEngine()
+        self._policy_engine = PolicyEngine(
+            settings=self.settings,
+            approval_store=self._approval_store,
+        )
+        self._action_executor = ActionExecutor(task_store=self._task_store)
         self._active_context_plan = None
         self._observers: list[RuntimeObserver] = []
         self._orchestrator = RequestOrchestrator(
             settings=self.settings,
             execution_planner=self._execution_planner,
             context_planner=self._context_planner,
+            action_executor=self._action_executor,
         )
 
         self._runtime = GenerationRuntime(settings=self.settings)
@@ -176,6 +191,7 @@ class BrainService:
             evidence_store=self._evidence_store,
             on_tool_start=self._handle_tool_started,
             on_tool_finish=self._handle_tool_finished,
+            policy_engine=self._policy_engine,
         )
 
         # --- Core connectors (always available) ---
@@ -186,11 +202,25 @@ class BrainService:
 
         # --- Memory connectors (requires second_brain EntityStore) ---
         if hasattr(self, "_entity_store"):
-            from connectors.memory_ops import MarkTaskDoneTool, UpdateFactTool, ListOpenTasksTool
+            from connectors.memory_ops import (
+                ForgetFactTool,
+                ListOpenTasksTool,
+                MarkTaskDoneTool,
+                UpdateFactTool,
+            )
+            from connectors.scheduled_reminders import (
+                CancelReminderTool,
+                ListScheduledTool,
+                ScheduleReminderTool,
+            )
             db_path = self.memory.db_path
             registry.register(MarkTaskDoneTool(db_path))
             registry.register(UpdateFactTool(db_path))
             registry.register(ListOpenTasksTool(db_path))
+            registry.register(ForgetFactTool(db_path))
+            registry.register(ScheduleReminderTool(db_path))
+            registry.register(ListScheduledTool(db_path))
+            registry.register(CancelReminderTool(db_path))
 
         # --- Optional connectors (gracefully skipped if deps missing) ---
         try:
@@ -198,6 +228,12 @@ class BrainService:
             registry.register(WebFetchTool())
         except ImportError:
             logger.debug('web_fetch unavailable (install "scrapling[fetchers]" + httpx to enable)')
+
+        try:
+            from connectors.browser_fetch import BrowserFetchTool
+            registry.register(BrowserFetchTool())
+        except ImportError:
+            logger.debug("browser_fetch unavailable (install playwright + run: playwright install chromium)")
 
         try:
             from connectors.shell import ShellTool
@@ -392,6 +428,20 @@ class BrainService:
             prefers_honesty=self._prefers_honesty,
             prefers_forced_yes=self._prefers_forced_yes,
         )
+
+    def _maybe_handle_task_completion(self, user_input: str) -> str | None:
+        if not hasattr(self, "_entity_store"):
+            return None
+        try:
+            from connectors.memory_ops import auto_mark_task_done_from_text
+
+            result = auto_mark_task_done_from_text(self.memory.db_path, user_input)
+        except Exception:
+            logger.debug("Deterministic task completion handler failed", exc_info=True)
+            return None
+        if result is None or result.is_error:
+            return None
+        return result.content.strip() or None
 
     def _stream_sentences(self, user_input: str, *, route: Any = None) -> Iterator[str]:
         prompt = self._build_prompt(user_input, text_mode=False, route=route)
@@ -656,6 +706,15 @@ class BrainService:
     def classify_ambiguous_tool_need(self, user_input: str) -> bool:
         return self._classify_ambiguous_tool_need(user_input)
 
+    def required_approval_tiers(self) -> tuple[str, ...]:
+        engine = getattr(self, "_policy_engine", None)
+        if engine is None:
+            return ()
+        try:
+            return tuple(sorted(str(tier) for tier in engine.required_tiers()))
+        except Exception:
+            return ()
+
     def report_status(self, status: str, *, detail: str = "", metadata: dict[str, Any] | None = None) -> None:
         self._notify_status(status, detail=detail, metadata=metadata)
 
@@ -701,6 +760,14 @@ class BrainService:
         self._notify_status("checking_tools", detail="Executing tool plan")
         yield from self._agent_loop.run(task, context=entity_context)
 
+    def agent_run_summary(self) -> Any:
+        if self._agent_loop is None:
+            return None
+        try:
+            return self._agent_loop.last_run_summary()
+        except Exception:
+            return None
+
     def persist_exchange(self, user_input: str, reply: str) -> None:
         self._persist_exchange(user_input, reply)
 
@@ -709,6 +776,12 @@ class BrainService:
         try:
             self._update_policy_state(user_input)
             self._notify_status("drafting_answer", detail="Preparing response")
+            task_completion = self._maybe_handle_task_completion(user_input)
+            if task_completion:
+                yield task_completion
+                self._persist_exchange(user_input, task_completion)
+                self._notify_status("done", detail="Reply complete")
+                return
             deterministic = self._deterministic_response(user_input)
             if deterministic:
                 reply = deterministic.strip()

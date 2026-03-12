@@ -26,6 +26,7 @@ a connection open across the potentially long lifetime of BrainService.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import TYPE_CHECKING
 
 from core.agent.tool_base import Tool, ToolResult
@@ -46,6 +47,75 @@ def _store(db_path: Path) -> EntityStore:
     """
     from core.second_brain.entity_store import EntityStore
     return EntityStore(db_path)
+
+
+_COMPLETION_PATTERNS = (
+    re.compile(
+        r"^\s*(?:i(?:'m| am)?\s+)?(?:done|finished|completed)\s+with\s+(?P<query>.+?)\s*[.!?]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:i(?:'ve| have)?\s*)?(?:finished|completed)\s+(?P<query>.+?)\s*[.!?]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:done|finished|completed)\s+(?P<query>.+?)\s*[.!?]*$",
+        re.IGNORECASE,
+    ),
+)
+_AMBIGUOUS_COMPLETION_RE = re.compile(
+    r"^\s*(?:i(?:'m| am|'ve| have)?\s*)?(?:done|finished|completed)(?:\s+(?:it|that|this))?\s*[.!?]*$",
+    re.IGNORECASE,
+)
+
+
+def _clean_completion_query(text: str) -> str:
+    value = (text or "").strip().strip(" .!?")
+    value = re.sub(r"^(?:the|my)\s+", "", value, flags=re.IGNORECASE)
+    return value.strip()
+
+
+def auto_mark_task_done_from_text(db_path: Path, text: str) -> ToolResult | None:
+    """Best-effort deterministic task completion helper.
+
+    This is intentionally conservative:
+      - explicit task phrases are matched via MarkTaskDoneTool's existing fuzzy logic
+      - vague completions like "done" only mutate memory when exactly one active
+        task/commitment exists
+      - ambiguous or no-match phrases return None so normal assistant flow continues
+    """
+    prompt = (text or "").strip()
+    if not prompt:
+        return None
+
+    tool = MarkTaskDoneTool(db_path)
+    for pattern in _COMPLETION_PATTERNS:
+        match = pattern.match(prompt)
+        if match is None:
+            continue
+        query = _clean_completion_query(match.group("query"))
+        if query.lower() in {"it", "that", "this"}:
+            break
+        result = tool.execute(key=query)
+        return result if not result.is_error else None
+
+    if not _AMBIGUOUS_COMPLETION_RE.match(prompt):
+        return None
+
+    store = _store(db_path)
+    active = [
+        *store.get_by_kind("task", status="active"),
+        *store.get_by_kind("commitment", status="active"),
+    ]
+    if len(active) != 1:
+        return None
+
+    entity = active[0]
+    store.mark_done(entity.id)
+    return ToolResult(
+        tool_name=MarkTaskDoneTool.name,
+        content=f"Marked '{entity.value}' as done.",
+    )
 
 
 class MarkTaskDoneTool(Tool):
@@ -155,3 +225,60 @@ class ListOpenTasksTool(Tool):
         if not content:
             return ToolResult(tool_name=self.name, content="No active tasks or commitments.")
         return ToolResult(tool_name=self.name, content=content)
+
+
+class ForgetFactTool(Tool):
+    """Permanently remove a stored fact, preference, or profile entry from memory.
+
+    Searches all entity kinds (profile, preference, task, commitment) using:
+    1. Exact key match.
+    2. Substring match on key or value (case-insensitive).
+
+    All matching active entries are marked done so they are never injected
+    into future prompts.  Use this when the user explicitly asks to forget
+    something ("forget I'm vegan", "remove my location", "don't remember that").
+    """
+    name = "forget_fact"
+    description = "Remove a stored fact, preference, or profile entry from memory permanently"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The fact, key, or value to forget (fuzzy matched across all kinds)",
+            },
+        },
+        "required": ["query"],
+    }
+
+    def __init__(self, db_path: Path) -> None:
+        self._db_path = db_path
+
+    def execute(self, *, query: str, **kwargs) -> ToolResult:
+        store = _store(self._db_path)
+        query_lower = query.lower()
+        matched: list[str] = []
+
+        for kind in ("profile", "preference", "task", "commitment"):
+            # Pass 1: exact key match
+            entity = store.get_by_key(kind, query)
+            if entity and entity.status == "active":
+                store.mark_done(entity.id)
+                matched.append(f"{kind}/{entity.key}")
+                continue
+            # Pass 2: substring match on key or value
+            for entity in store.get_by_kind(kind, status="active"):
+                if query_lower in entity.key.lower() or query_lower in entity.value.lower():
+                    store.mark_done(entity.id)
+                    matched.append(f"{kind}/{entity.key}")
+
+        if matched:
+            return ToolResult(
+                tool_name=self.name,
+                content=f"Forgotten and removed from memory: {', '.join(matched)}.",
+            )
+        return ToolResult(
+            tool_name=self.name,
+            content=f"No stored fact matching '{query}' found.",
+            is_error=True,
+        )

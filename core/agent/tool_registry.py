@@ -45,12 +45,14 @@ class ToolRegistry:
         evidence_store: Any | None = None,
         on_tool_start: Any | None = None,
         on_tool_finish: Any | None = None,
+        policy_engine: Any | None = None,
     ) -> None:
         self._tools: dict[str, Tool] = {}
         self._trace_store = trace_store
         self._evidence_store = evidence_store
         self._on_tool_start = on_tool_start
         self._on_tool_finish = on_tool_finish
+        self._policy_engine = policy_engine
 
     def register(self, tool: Tool) -> None:
         """Add a tool to the registry.
@@ -77,6 +79,9 @@ class ToolRegistry:
     def _normalize_name(self, name: str) -> str:
         key = (name or "").strip().lower()
         return _TOOL_ALIASES.get(key, key)
+
+    def canonical_name(self, name: str) -> str:
+        return self._normalize_name(name)
 
     def _repair_args(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         repaired = dict(args)
@@ -212,6 +217,56 @@ class ToolRegistry:
                 query_text=str(repaired_args),
                 started=started,
             )
+
+        if self._policy_engine is not None:
+            try:
+                decision = self._policy_engine.evaluate(tool_name=tool_name, args=repaired_args)
+            except Exception as exc:
+                logger.exception("Policy engine error for '%s'", tool_name)
+                decision = None
+                policy_error = str(exc)
+            else:
+                policy_error = ""
+
+            if policy_error:
+                return self._finalize(
+                    ToolResult(
+                        tool_name=tool_name,
+                        content=f"[POLICY_BLOCK:blocked] Policy check failed: {policy_error}",
+                        is_error=True,
+                        outcome=ToolOutcome(
+                            status="blocked",
+                            structured=None,
+                            sources=[],
+                            retryable=False,
+                            side_effects=False,
+                        ),
+                    ),
+                    query_text=str(repaired_args),
+                    started=started,
+                )
+
+            if decision is not None and not getattr(decision, "allowed", False):
+                message = str(getattr(decision, "message", "")).strip() or (
+                    f"[POLICY_BLOCK:blocked] Tool '{tool_name}' was blocked by policy."
+                )
+                return self._finalize(
+                    ToolResult(
+                        tool_name=tool_name,
+                        content=message,
+                        is_error=True,
+                        outcome=ToolOutcome(
+                            status="blocked",
+                            structured=None,
+                            sources=[],
+                            retryable=False,
+                            side_effects=False,
+                        ),
+                    ),
+                    query_text=str(repaired_args),
+                    started=started,
+                )
+
         if callable(self._on_tool_start):
             try:
                 self._on_tool_start(tool_name, dict(repaired_args))

@@ -204,6 +204,37 @@ class TestToolRegistry(unittest.TestCase):
         self.assertEqual(len(starts), 1)
         self.assertEqual(starts[0][0], "web_fetch")
 
+    def test_policy_engine_blocks_tool_execution(self) -> None:
+        class _PolicyEngine:
+            def evaluate(self, *, tool_name: str, args: dict[str, Any]):
+                _ = (tool_name, args)
+                return type(
+                    "Decision",
+                    (),
+                    {
+                        "allowed": False,
+                        "message": "[POLICY_BLOCK:awaiting_approval] blocked",
+                    },
+                )()
+
+        registry = ToolRegistry(policy_engine=_PolicyEngine())
+        registry.register(_EchoTool())
+        result = registry.execute(ToolCall(name="echo", args={"message": "hello"}))
+        self.assertTrue(result.is_error)
+        self.assertIn("POLICY_BLOCK", result.content)
+
+    def test_policy_engine_allows_tool_execution(self) -> None:
+        class _PolicyEngine:
+            def evaluate(self, *, tool_name: str, args: dict[str, Any]):
+                _ = (tool_name, args)
+                return type("Decision", (), {"allowed": True})()
+
+        registry = ToolRegistry(policy_engine=_PolicyEngine())
+        registry.register(_EchoTool())
+        result = registry.execute(ToolCall(name="echo", args={"message": "hello"}))
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.content, "hello")
+
 
 if __name__ == "__main__":
     unittest.main()
