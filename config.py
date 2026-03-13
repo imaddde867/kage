@@ -173,12 +173,26 @@ class Settings:
     # considering insecure fallback.
     web_fetch_tls_retry_with_certifi: bool
 
+    # Local artifact access policy — read-only file discovery and extraction.
+    # Paths must stay within LOCAL_ARTIFACT_SAFE_ROOTS and outside
+    # LOCAL_ARTIFACT_DENY_ROOTS.
+    local_artifact_safe_roots: tuple[str, ...]
+    local_artifact_deny_roots: tuple[str, ...]
+    local_artifact_max_chars: int
+    local_artifact_max_file_bytes: int
+    local_artifact_find_max_files: int
+
     # Cron daemon — fires scheduled reminders stored via ScheduleReminderTool.
     # A daemon thread polls EntityStore every cron_poll_interval_seconds and
     # speaks any reminder whose due_date has passed.
     # Requires SECOND_BRAIN_ENABLED=true to have an active EntityStore.
     cron_enabled: bool              # CRON_ENABLED — starts CronDaemon on voice mode startup
     cron_poll_interval_seconds: int # CRON_POLL_INTERVAL_SECONDS — seconds between polls
+
+    # Conversation session — after wake-word activation, stay in listen mode
+    # until the user goes silent for this many seconds.  0 = disabled (original
+    # one-shot behavior: break back to wake word after every response).
+    conversation_timeout_seconds: float
 
     # Calendar connector runtime tuning.
     calendar_read_timeout_seconds: int
@@ -262,6 +276,31 @@ def get() -> Settings:
             (),
         ),
         web_fetch_tls_retry_with_certifi=_env_bool("WEB_FETCH_TLS_RETRY_WITH_CERTIFI", True),
+        local_artifact_safe_roots=_env_csv(
+            "LOCAL_ARTIFACT_SAFE_ROOTS",
+            ("./", "~"),
+        ),
+        local_artifact_deny_roots=_env_csv(
+            "LOCAL_ARTIFACT_DENY_ROOTS",
+            (
+                "~/.ssh",
+                "~/.gnupg",
+                "~/.aws",
+                "~/.kube",
+                "~/Library/Keychains",
+                "~/Library/Application Support",
+                "/etc",
+                "/private",
+                "/System",
+                "/usr",
+                "/bin",
+                "/sbin",
+            ),
+        ),
+        local_artifact_max_chars=max(500, _env_int("LOCAL_ARTIFACT_MAX_CHARS", 8000)),
+        local_artifact_max_file_bytes=max(1024, _env_int("LOCAL_ARTIFACT_MAX_FILE_BYTES", 8 * 1024 * 1024)),
+        local_artifact_find_max_files=max(500, _env_int("LOCAL_ARTIFACT_FIND_MAX_FILES", 50000)),
+        conversation_timeout_seconds=max(0.0, _env_float("CONVERSATION_TIMEOUT_SECONDS", 45.0)),
         cron_enabled=_env_bool("CRON_ENABLED", False),
         cron_poll_interval_seconds=max(10, _env_int("CRON_POLL_INTERVAL_SECONDS", 60)),
         calendar_read_timeout_seconds=max(1, _env_int("CALENDAR_READ_TIMEOUT_SECONDS", 10)),
