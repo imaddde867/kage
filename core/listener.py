@@ -254,5 +254,12 @@ class ListenerService:
         if "/" not in model:
             model = f"mlx-community/whisper-{model}-mlx"
         audio_f32 = audio.astype(np.float32) / 32768.0
-        result = mlx_whisper.transcribe(audio_f32, path_or_hf_repo=model, language="en")
+        result = mlx_whisper.transcribe(
+            audio_f32,
+            path_or_hf_repo=model,
+            language="en",
+            temperature=0.0,
+            condition_on_previous_text=False,
+            verbose=False,
+        )
         return result.get("text", "").strip()

@@ -94,9 +94,11 @@ Rules:
 - For comparison tasks, gather evidence for each side before concluding
 - For "my local machine" questions, use shell commands for system facts instead of guessing
 - shell only accepts a single read-only command (no &&, pipes, redirects, or semicolons)
+- For local file requests, use local_find_files first when needed, then local_read_text/local_extract_pdf/local_extract_docx/local_extract_sheet
 - For comparison/performance questions, do not finalize until you have at least one relevant tool result
 - When reporting web facts, always cite the source URL in your answer
 - Do not claim to have searched or fetched data unless a tool result supports it
+- Do not claim inability to access local files if local_* tools are available; attempt safe read/extraction first
 - If a tool fails, try an alternative or explain the limitation
 - XML fallback (<tool>/<input>/<answer>) is accepted for compatibility, but prefer JSON objects
 - Max {max_steps} steps
@@ -697,6 +699,16 @@ class AgentLoop:
 
     def _handle_plain_response(self, *, raw: str, task: str, state: _LoopRunState) -> str | None:
         plain = self._sanitize_user_answer_text(raw)
+        # Guard: truncated JSON tool call leaked past the parser (token-limit cutoff).
+        # Treat it as a malformed step and force a retry with a correction hint.
+        if plain.lstrip().startswith("{") and '"tool"' in plain:
+            self._append_history(
+                state.history,
+                raw,
+                "format_guard",
+                "Output was truncated before the JSON closed. Produce a shorter thought or use the final answer format.",
+            )
+            return None
         if not plain:
             self._append_history(
                 state.history,
