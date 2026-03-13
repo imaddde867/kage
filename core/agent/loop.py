@@ -56,12 +56,67 @@ from urllib.parse import urlparse, urlunparse
 
 import config
 from core.agent.parser import parse_step
+from core.agent.tool_base import ToolCall
 from core.agent.tool_registry import ToolRegistry
 from core.brain_guardrails import guard_answer_truthfulness, guard_temporal_uncertainty
 from core.brain_prompting import apply_chat_template
 from core.intent_signals import DEFAULT_SIGNALS
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Local-file pre-flight helpers
+# ---------------------------------------------------------------------------
+
+_LOCAL_EXPLICIT_RE = re.compile(
+    r'(?:~/|/(?:Users|home)/\w+)[/\w.\- ]*\.(?:pdf|docx|xlsx|xlsm|csv|tsv|txt)',
+    re.IGNORECASE,
+)
+# "computer.pdf ... under/in Downloads"
+_DL_BEFORE_RE = re.compile(
+    r'\b([\w\-]+\.(?:pdf|docx|xlsx|xlsm|csv|tsv|txt))\b[^.]*?'
+    r'(?:under|in|from|at)\s+(?:(?:my|the)\s+)?[Dd]ownloads?',
+    re.IGNORECASE,
+)
+# "under/in Downloads ... computer.pdf"
+_DL_AFTER_RE = re.compile(
+    r'(?:under|in|from|at)\s+(?:(?:my|the)\s+)?[Dd]ownloads?[^.]*?'
+    r'\b([\w\-]+\.(?:pdf|docx|xlsx|xlsm|csv|tsv|txt))\b',
+    re.IGNORECASE,
+)
+
+
+def _ext_to_local_tool(path: str) -> str:
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    if ext == "pdf":
+        return "local_extract_pdf"
+    if ext == "docx":
+        return "local_extract_docx"
+    if ext in ("xlsx", "xlsm", "csv", "tsv"):
+        return "local_extract_sheet"
+    return "local_read_text"
+
+
+def _extract_file_refs(task: str) -> list[tuple[str, str]]:
+    """Return (path_str, tool_name) for every local file mentioned in task."""
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(p: str) -> None:
+        norm = p.strip()
+        if norm and norm not in seen:
+            seen.add(norm)
+            found.append((norm, _ext_to_local_tool(norm)))
+
+    for m in _LOCAL_EXPLICIT_RE.finditer(task):
+        _add(m.group(0))
+    for m in _DL_BEFORE_RE.finditer(task):
+        _add(f"~/Downloads/{m.group(1)}")
+    for m in _DL_AFTER_RE.finditer(task):
+        _add(f"~/Downloads/{m.group(1)}")
+
+    return found
+
 
 # ---------------------------------------------------------------------------
 # System prompt template
@@ -259,6 +314,29 @@ class AgentLoop:
     # ------------------------------------------------------------------
     # Generation
     # ------------------------------------------------------------------
+
+    def _preflight_local_files(self, task: str, state: _LoopRunState) -> None:
+        """Pre-read any locally referenced files before the first LLM generation.
+
+        Small models reliably refuse to call local file tools despite system-prompt
+        instructions — their training says "I cannot access local files" and wins.
+        Executing the read here and injecting the result as history means the model's
+        first generation already sees the file content; it only needs to analyse it.
+        """
+        refs = _extract_file_refs(task)
+        for path_str, tool_name in refs:
+            tool_call = ToolCall(name=tool_name, args={"path": path_str})
+            result, attempts = self._execute_tool_with_retries(tool_call)
+            state.tool_calls += attempts
+            state.tools_used.add(result.tool_name)
+            synthetic_raw = json.dumps({
+                "type": "tool",
+                "thought": f"Pre-reading local file: {path_str}",
+                "tool": tool_name,
+                "args": {"path": path_str},
+            })
+            content = self._record_tool_result_state(state=state, result=result, attempts=attempts)
+            self._append_history(state.history, synthetic_raw, result.tool_name, content)
 
     def _generate(self, prompt: str) -> str:
         """Accumulate the full model output for one step into a single string.
@@ -824,6 +902,10 @@ class AgentLoop:
         system = self._system_prompt(entity_context=context, max_steps=max_steps)
         state = _LoopRunState()
         self._set_last_run_summary(state=state, had_output=False, steps=0, failed=False)
+
+        # Pre-read any locally referenced files so the model sees the content
+        # on step 1 instead of refusing to call the tool.
+        self._preflight_local_files(task, state)
 
         try:
             for step_num in range(max_steps):
