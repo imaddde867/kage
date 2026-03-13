@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 import time
 from collections.abc import Iterator
@@ -28,6 +29,9 @@ class ListenerService:
         self._interrupt_wake_armed = False
         self._interrupt_speech_frames = 0
         self._interrupt_wake_deadline = 0.0
+        # Rolling pre-buffer: last ~500ms of audio captured during wake-word detection.
+        # Prepended to the recording so speech said right after "hey kage" isn't lost.
+        self._pre_buffer: list[np.ndarray] = []
 
     @staticmethod
     def _normalize_backend(value: str) -> str:
@@ -49,17 +53,16 @@ class ListenerService:
         if self._stt_backend == "apple":
             logger.info("Listener STT backend: apple")
         else:
-            logger.info("Loading Whisper model")
-            from faster_whisper import WhisperModel
-            self._whisper = WhisperModel(self.settings.whisper_model, device="cpu", compute_type="int8")
-            logger.info("Whisper ready")
+            logger.info("Listener STT backend: mlx-whisper (model will load on first transcription)")
 
         logger.info("Loading wake word model")
         import openwakeword
         from openwakeword.model import Model as WakeWordModel
-        openwakeword.utils.download_models([self.settings.wake_word_model])
+        ww_model = self.settings.wake_word_model
+        if not os.path.isfile(ww_model):
+            openwakeword.utils.download_models([ww_model])
         self._wake_model = WakeWordModel(
-            wakeword_models=[self.settings.wake_word_model],
+            wakeword_models=[ww_model],
             inference_framework="onnx",
         )
         self._models_loaded = True
@@ -69,20 +72,29 @@ class ListenerService:
         if not self._models_loaded:
             self.load_models()
         chunk = self.settings.wake_word_chunk_size
+        # Keep ~500ms rolling buffer so speech immediately after wake word isn't lost
+        pre_buffer_chunks = max(1, int(0.5 * self.settings.sample_rate / chunk))
+        rolling: list[np.ndarray] = []
         sd_lib = self._require_sounddevice()
         with sd_lib.InputStream(samplerate=self.settings.sample_rate, channels=1, dtype="int16", blocksize=chunk) as stream:
             while True:
                 audio, _ = stream.read(chunk)
-                scores = self._wake_model.predict(np.asarray(audio).flatten().astype(np.int16))
+                flat = np.asarray(audio).flatten().astype(np.int16)
+                rolling.append(flat)
+                if len(rolling) > pre_buffer_chunks:
+                    rolling.pop(0)
+                scores = self._wake_model.predict(flat)
                 for name, score in scores.items():
                     if float(score) > self.settings.wake_word_threshold:
                         logger.info("Wake word '%s' detected (%.2f)", name, float(score))
+                        self._pre_buffer = list(rolling)
                         return
 
     def record_until_silence(self) -> np.ndarray:
         logger.info("Listening for user speech")
         chunk = self.settings.record_chunk_size
-        chunks: list[np.ndarray] = []
+        chunks: list[np.ndarray] = list(self._pre_buffer)
+        self._pre_buffer = []
         silence = 0
         silence_needed = int(self.settings.silence_duration * self.settings.sample_rate / chunk)
         max_chunks = int(self.settings.max_record_seconds * self.settings.sample_rate / chunk)
@@ -110,7 +122,8 @@ class ListenerService:
         """
         logger.info("Listening for user speech (streaming STT)")
         chunk = self.settings.record_chunk_size
-        chunks: list[np.ndarray] = []
+        chunks: list[np.ndarray] = list(self._pre_buffer)
+        self._pre_buffer = []
         silence = 0
         silence_needed = int(self.settings.silence_duration * self.settings.sample_rate / chunk)
         max_chunks = int(self.settings.max_record_seconds * self.settings.sample_rate / chunk)
@@ -236,9 +249,10 @@ class ListenerService:
             return self._transcribe_whisper(audio)
 
     def _transcribe_whisper(self, audio: np.ndarray) -> str:
-        if self._whisper is None:
-            from faster_whisper import WhisperModel
-            self._whisper = WhisperModel(self.settings.whisper_model, device="cpu", compute_type="int8")
+        import mlx_whisper
+        model = self.settings.whisper_model
+        if "/" not in model:
+            model = f"mlx-community/whisper-{model}-mlx"
         audio_f32 = audio.astype(np.float32) / 32768.0
-        segments, _ = self._whisper.transcribe(audio_f32, language="en")
-        return " ".join(s.text.strip() for s in segments).strip()
+        result = mlx_whisper.transcribe(audio_f32, path_or_hf_repo=model, language="en")
+        return result.get("text", "").strip()
