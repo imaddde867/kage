@@ -226,13 +226,29 @@ def run_voice(settings: config.Settings, timing: bool = False) -> None:
             listener.wait_for_wake_word()
             _say("Yeah?", coordinator=coordinator)
 
+            consecutive_empty = 0
+            session_timeout = settings.conversation_timeout_seconds
+            session_enabled = session_timeout > 0
+
             while True:
                 user_text = _listen_once(listener, coordinator)
                 if not user_text:
+                    consecutive_empty += 1
+                    idle_seconds = consecutive_empty * settings.silence_duration
+                    if not session_enabled or consecutive_empty == 1:
+                        # First empty or session mode disabled → bail out
+                        coordinator.transition(AudioState.IDLE)
+                        _say("Didn't catch that.", coordinator=coordinator)
+                        break
+                    if idle_seconds >= session_timeout:
+                        coordinator.transition(AudioState.IDLE)
+                        _say("I'll be here if you need me.", coordinator=coordinator)
+                        break
+                    # Still within timeout — keep listening silently
                     coordinator.transition(AudioState.IDLE)
-                    _say("Didn't catch that.", coordinator=coordinator)
-                    break
+                    continue
 
+                consecutive_empty = 0
                 print(f"[You]: {user_text}")
                 coordinator.transition(AudioState.THINKING)
                 interrupted = respond(
@@ -247,8 +263,8 @@ def run_voice(settings: config.Settings, timing: bool = False) -> None:
                     continue
 
                 coordinator.transition(AudioState.IDLE)
-                time.sleep(0.6)
-                break
+                if not session_enabled:
+                    break
         except KeyboardInterrupt:
             print("\n[Kage] Going offline.")
             return
