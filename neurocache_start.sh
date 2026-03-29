@@ -4,7 +4,7 @@
 set -euo pipefail
 
 KAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SECOND_BRAIN_DIR="/Users/imadeddine/code/second-brain"
+SECOND_BRAIN_DIR="$KAGE_DIR/second_brain"
 SECOND_BRAIN_VENV="$SECOND_BRAIN_DIR/.venv"
 KAGE_PYTHON="${HOME}/.local/share/mamba/envs/kage/bin/python"
 

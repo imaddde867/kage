@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "second-brain"
+version = "0.1.0"
+description = "Local AI second brain — query your Obsidian vault with a knowledge graph and LLM."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Imad Eddine El Mouss"}]
+
+dependencies = [
+    "watchdog>=4.0",
+    "chromadb>=1.0",
+    "ollama>=0.4",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "kuzu>=0.8",
+    "rich>=13.0",
+    "typer>=0.12",
+    "pyyaml>=6.0",
+    "tree-sitter>=0.22",
+    "tree-sitter-python",
+    "tree-sitter-javascript",
+    "tree-sitter-typescript",
+    "rank-bm25>=0.2.2",
+]
+
+[project.scripts]
+brain = "interface.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["ingestion*", "graph*", "query*", "interface*", "api*"]

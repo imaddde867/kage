@@ -9,10 +9,17 @@ data/**
 *.sqlite3
 *.sqlite3-*
 
+# second_brain runtime data and environment
+second_brain/data/
+second_brain/.venv/
+second_brain/*.egg-info/
+second_brain/cortex-ui/node_modules/
+
 # Secrets / local env
 .env
 .env.*
 !.env.example
+!second_brain/.env.example
 
 # Python artifacts
 __pycache__/
@@ -20,6 +27,9 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Node
+node_modules/
 
 # Local/editor
 .DS_Store
