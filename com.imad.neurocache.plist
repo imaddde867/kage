@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.imad.neurocache</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/imadeddine/code/kage/second_brain/.venv/bin/uvicorn</string>
+        <string>api.server:app</string>
+        <string>--port</string>
+        <string>8765</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--log-level</string>
+        <string>warning</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/imadeddine/code/kage/second_brain</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/imadeddine/Library/Logs/neurocache/server.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/imadeddine/Library/Logs/neurocache/server.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>
