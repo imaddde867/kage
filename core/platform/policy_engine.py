@@ -6,7 +6,7 @@ from typing import Any
 from core.platform.models import RiskTier
 from core.platform.storage import ApprovalStore
 
-_VALID_POLICY_MODES = {"strict", "hybrid", "owner_fast"}
+_VALID_POLICY_MODES = {"strict", "hybrid", "owner_fast", "interactive"}
 _VALID_TIERS = {tier.value for tier in RiskTier}
 _DEFAULT_REQUIRED_TIERS = {RiskTier.MODERATE_CHANGE.value, RiskTier.HIGH_IMPACT.value}
 
@@ -64,12 +64,19 @@ class PolicyEngine:
 
     def required_tiers(self) -> set[str]:
         mode = self.mode()
-        if mode == "owner_fast":
+        if mode in {"owner_fast", "interactive"}:
+            # interactive: the engine allows all tools; the actual voice
+            # confirmation ("Do you want me to run X?") is handled at the
+            # app_runner dispatch layer before this decision is consulted.
             return set()
         if mode == "hybrid":
             return {RiskTier.HIGH_IMPACT.value}
         configured = set(self.configured_required_tiers())
         return configured
+
+    def is_interactive(self) -> bool:
+        """True when voice confirmation should be requested before tool execution."""
+        return self.mode() == "interactive"
 
     def tier_for_tool(self, tool_name: str) -> RiskTier | None:
         key = (tool_name or "").strip().lower()

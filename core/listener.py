@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
+
 try:
     import sounddevice as sd
 except ImportError:  # pragma: no cover - optional in test environments
@@ -23,6 +24,7 @@ class ListenerService:
     def __init__(self, *, settings: config.Settings | None = None) -> None:
         self.settings = settings or config.get()
         self._whisper: Any | None = None
+        self._parakeet: Any | None = None
         self._wake_model: Any | None = None
         self._models_loaded = False
         self._stt_backend = self._normalize_backend(self.settings.stt_backend)
@@ -38,12 +40,16 @@ class ListenerService:
         raw = (value or "").strip().lower()
         if raw in {"whisper", "faster_whisper", "faster-whisper"}:
             return "whisper"
+        if raw in {"parakeet", "parakeet-v3", "parakeet_tdt"}:
+            return "parakeet"
         return "apple"
 
     @staticmethod
     def _require_sounddevice() -> Any:
         if sd is None:
-            raise RuntimeError("sounddevice is not installed. Install it with: pip install sounddevice")
+            raise RuntimeError(
+                "sounddevice is not installed. Install it with: pip install sounddevice"
+            )
         return sd
 
     def load_models(self) -> None:
@@ -52,12 +58,21 @@ class ListenerService:
 
         if self._stt_backend == "apple":
             logger.info("Listener STT backend: apple")
+        elif self._stt_backend == "parakeet":
+            logger.info("Listener STT backend: parakeet (loading model...)")
+            from nano_parakeet import from_pretrained
+
+            self._parakeet = from_pretrained("nvidia/parakeet-tdt-0.6b-v3")
+            logger.info("Parakeet model loaded")
         else:
-            logger.info("Listener STT backend: mlx-whisper (model will load on first transcription)")
+            logger.info(
+                "Listener STT backend: mlx-whisper (model will load on first transcription)"
+            )
 
         logger.info("Loading wake word model")
         import openwakeword
         from openwakeword.model import Model as WakeWordModel
+
         ww_model = self.settings.wake_word_model
         if not os.path.isfile(ww_model):
             openwakeword.utils.download_models([ww_model])
@@ -76,7 +91,12 @@ class ListenerService:
         pre_buffer_chunks = max(1, int(0.5 * self.settings.sample_rate / chunk))
         rolling: list[np.ndarray] = []
         sd_lib = self._require_sounddevice()
-        with sd_lib.InputStream(samplerate=self.settings.sample_rate, channels=1, dtype="int16", blocksize=chunk) as stream:
+        with sd_lib.InputStream(
+            samplerate=self.settings.sample_rate,
+            channels=1,
+            dtype="int16",
+            blocksize=chunk,
+        ) as stream:
             while True:
                 audio, _ = stream.read(chunk)
                 flat = np.asarray(audio).flatten().astype(np.int16)
@@ -86,7 +106,9 @@ class ListenerService:
                 scores = self._wake_model.predict(flat)
                 for name, score in scores.items():
                     if float(score) > self.settings.wake_word_threshold:
-                        logger.info("Wake word '%s' detected (%.2f)", name, float(score))
+                        logger.info(
+                            "Wake word '%s' detected (%.2f)", name, float(score)
+                        )
                         self._pre_buffer = list(rolling)
                         return
 
@@ -96,11 +118,20 @@ class ListenerService:
         chunks: list[np.ndarray] = list(self._pre_buffer)
         self._pre_buffer = []
         silence = 0
-        silence_needed = int(self.settings.silence_duration * self.settings.sample_rate / chunk)
-        max_chunks = int(self.settings.max_record_seconds * self.settings.sample_rate / chunk)
+        silence_needed = int(
+            self.settings.silence_duration * self.settings.sample_rate / chunk
+        )
+        max_chunks = int(
+            self.settings.max_record_seconds * self.settings.sample_rate / chunk
+        )
 
         sd_lib = self._require_sounddevice()
-        with sd_lib.InputStream(samplerate=self.settings.sample_rate, channels=1, dtype="int16", blocksize=chunk) as stream:
+        with sd_lib.InputStream(
+            samplerate=self.settings.sample_rate,
+            channels=1,
+            dtype="int16",
+            blocksize=chunk,
+        ) as stream:
             for _ in range(max_chunks):
                 audio, _ = stream.read(chunk)
                 flat = np.asarray(audio, dtype=np.int16).reshape(-1)
@@ -112,7 +143,11 @@ class ListenerService:
                 else:
                     silence = 0
 
-        return np.concatenate(chunks).astype(np.int16, copy=False) if chunks else np.array([], dtype=np.int16)
+        return (
+            np.concatenate(chunks).astype(np.int16, copy=False)
+            if chunks
+            else np.array([], dtype=np.int16)
+        )
 
     def record_with_partial_transcripts(self) -> Iterator[tuple[str, bool]]:
         """Yield partial transcripts while recording, then yield the final transcript.
@@ -125,15 +160,26 @@ class ListenerService:
         chunks: list[np.ndarray] = list(self._pre_buffer)
         self._pre_buffer = []
         silence = 0
-        silence_needed = int(self.settings.silence_duration * self.settings.sample_rate / chunk)
-        max_chunks = int(self.settings.max_record_seconds * self.settings.sample_rate / chunk)
-        partial_interval = float(getattr(self.settings, "stt_stream_interval_seconds", 0.8))
-        partial_every = max(1, int(partial_interval * self.settings.sample_rate / chunk))
-        min_chars = max(0, int(getattr(self.settings, "stt_stream_min_chars", 0)))
+        silence_needed = int(
+            self.settings.silence_duration * self.settings.sample_rate / chunk
+        )
+        max_chunks = int(
+            self.settings.max_record_seconds * self.settings.sample_rate / chunk
+        )
+        partial_interval = float(self.settings.stt_stream_interval_seconds)
+        partial_every = max(
+            1, int(partial_interval * self.settings.sample_rate / chunk)
+        )
+        min_chars = max(0, int(self.settings.stt_stream_min_chars))
         last_partial = ""
 
         sd_lib = self._require_sounddevice()
-        with sd_lib.InputStream(samplerate=self.settings.sample_rate, channels=1, dtype="int16", blocksize=chunk) as stream:
+        with sd_lib.InputStream(
+            samplerate=self.settings.sample_rate,
+            channels=1,
+            dtype="int16",
+            blocksize=chunk,
+        ) as stream:
             for idx in range(max_chunks):
                 audio, _ = stream.read(chunk)
                 flat = np.asarray(audio, dtype=np.int16).reshape(-1)
@@ -142,7 +188,11 @@ class ListenerService:
                 if (idx + 1) % partial_every == 0 and chunks:
                     preview_audio = np.concatenate(chunks).astype(np.int16, copy=False)
                     partial = self.transcribe(preview_audio).strip()
-                    if partial and len(partial) >= min_chars and partial != last_partial:
+                    if (
+                        partial
+                        and len(partial) >= min_chars
+                        and partial != last_partial
+                    ):
                         last_partial = partial
                         yield partial, False
 
@@ -153,7 +203,11 @@ class ListenerService:
                 else:
                     silence = 0
 
-        final_audio = np.concatenate(chunks).astype(np.int16, copy=False) if chunks else np.array([], dtype=np.int16)
+        final_audio = (
+            np.concatenate(chunks).astype(np.int16, copy=False)
+            if chunks
+            else np.array([], dtype=np.int16)
+        )
         final_text = self.transcribe(final_audio).strip()
         if final_text:
             yield final_text, True
@@ -178,7 +232,10 @@ class ListenerService:
 
         now = time.monotonic()
         wake_scores = self._wake_model.predict(flat)
-        wake_hit = any(float(score) >= self.settings.interrupt_min_score for score in wake_scores.values())
+        wake_hit = any(
+            float(score) >= self.settings.interrupt_min_score
+            for score in wake_scores.values()
+        )
         if wake_hit:
             self._interrupt_wake_armed = True
             self._interrupt_speech_frames = 0
@@ -197,7 +254,9 @@ class ListenerService:
             self._interrupt_speech_frames = max(0, self._interrupt_speech_frames - 1)
 
         chunk_ms = (flat.size / self.settings.sample_rate) * 1000.0
-        needed_frames = max(1, math.ceil(self.settings.interrupt_hold_ms / max(chunk_ms, 1.0)))
+        needed_frames = max(
+            1, math.ceil(self.settings.interrupt_hold_ms / max(chunk_ms, 1.0))
+        )
         if self._interrupt_speech_frames >= needed_frames:
             self.reset_interrupt_detector()
             return True
@@ -212,7 +271,9 @@ class ListenerService:
         if not canonical:
             return text
 
-        variants = tuple(v.strip() for v in self.settings.stt_name_variants if v.strip())
+        variants = tuple(
+            v.strip() for v in self.settings.stt_name_variants if v.strip()
+        )
         if not variants:
             return text
 
@@ -230,6 +291,8 @@ class ListenerService:
             return ""
         if self._stt_backend == "apple":
             text = self._transcribe_apple(audio)
+        elif self._stt_backend == "parakeet":
+            text = self._transcribe_parakeet(audio)
         else:
             text = self._transcribe_whisper(audio)
         return self._normalize_transcript_name(text)
@@ -237,6 +300,7 @@ class ListenerService:
     def _transcribe_apple(self, audio: np.ndarray) -> str:
         try:
             import speech_recognition as sr
+
             audio_data = sr.AudioData(audio.tobytes(), self.settings.sample_rate, 2)
             return sr.Recognizer().recognize_apple(audio_data)
         except ImportError:
@@ -250,6 +314,7 @@ class ListenerService:
 
     def _transcribe_whisper(self, audio: np.ndarray) -> str:
         import mlx_whisper
+
         model = self.settings.whisper_model
         if "/" not in model:
             model = f"mlx-community/whisper-{model}-mlx"
@@ -263,3 +328,12 @@ class ListenerService:
             verbose=False,
         )
         return result.get("text", "").strip()
+
+    def _transcribe_parakeet(self, audio: np.ndarray) -> str:
+        if self._parakeet is None:
+            from nano_parakeet import from_pretrained
+
+            self._parakeet = from_pretrained("nvidia/parakeet-tdt-0.6b-v3")
+        audio_f32 = audio.astype(np.float32) / 32768.0
+        result = self._parakeet.transcribe(audio_f32)
+        return result.text.strip()

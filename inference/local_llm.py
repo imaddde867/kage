@@ -83,9 +83,20 @@ class LocalLLM:
         ram_before = _ram_gb()
         t0 = time.perf_counter()
 
-        # get_model_path() only accepts HF repo IDs — bypass it for local paths
-        local = Path(self.model_id).expanduser()
-        model_path = str(local) if local.is_dir() else get_model_path(self.model_id)
+        # get_model_path() only accepts HF repo IDs — bypass it for local paths.
+        # A "local path" is anything starting with ~, /, or . (relative).
+        _is_local_path = self.model_id.startswith(("~", "/", "./", "../"))
+        if _is_local_path:
+            local = Path(self.model_id).expanduser().resolve()
+            if not local.is_dir():
+                raise FileNotFoundError(
+                    f"Local model path not found: {local}\n"
+                    "To use the pre-downloaded HF model, pass the repo ID instead:\n"
+                    "  LocalLLM('mlx-community/Qwen3.5-9B-MLX-4bit')"
+                )
+            model_path = str(local)
+        else:
+            model_path = get_model_path(self.model_id)
         self._model = load_model(model_path)
 
         hf_logging.set_verbosity_error()

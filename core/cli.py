@@ -80,14 +80,28 @@ def collect_doctor_checks(*, settings: config.Settings) -> list[DoctorCheck]:
             )
         )
     else:
-        checks.append(DoctorCheck("model_compat", "ok", f"Configured model: {settings.mlx_model}"))
+        checks.append(
+            DoctorCheck("model_compat", "ok", f"Configured model: {settings.mlx_model}")
+        )
 
     memory_dir = Path(settings.memory_dir).expanduser()
     memory_parent = memory_dir if memory_dir.exists() else memory_dir.parent
-    if memory_dir.exists() and memory_dir.is_dir() and os.access(memory_dir, os.R_OK | os.W_OK):
-        checks.append(DoctorCheck("memory_dir", "ok", f"Readable and writable: {memory_dir}"))
+    if (
+        memory_dir.exists()
+        and memory_dir.is_dir()
+        and os.access(memory_dir, os.R_OK | os.W_OK)
+    ):
+        checks.append(
+            DoctorCheck("memory_dir", "ok", f"Readable and writable: {memory_dir}")
+        )
     elif memory_dir.exists() and not memory_dir.is_dir():
-        checks.append(DoctorCheck("memory_dir", "error", f"Path exists but is not a directory: {memory_dir}"))
+        checks.append(
+            DoctorCheck(
+                "memory_dir",
+                "error",
+                f"Path exists but is not a directory: {memory_dir}",
+            )
+        )
     elif memory_parent.exists() and os.access(memory_parent, os.W_OK):
         checks.append(
             DoctorCheck(
@@ -111,6 +125,7 @@ def collect_doctor_checks(*, settings: config.Settings) -> list[DoctorCheck]:
         "openwakeword": _module_available("openwakeword"),
         "SpeechRecognition": _module_available("speech_recognition"),
         "faster_whisper": _module_available("faster_whisper"),
+        "nano_parakeet": _module_available("nano_parakeet"),
         "ddgs": _module_available("ddgs") or _module_available("duckduckgo_search"),
         "scrapling": _module_available("scrapling"),
         "httpx": _module_available("httpx"),
@@ -125,17 +140,29 @@ def collect_doctor_checks(*, settings: config.Settings) -> list[DoctorCheck]:
         checks.append(DoctorCheck(f"dependency:{name}", status, detail))
 
     if dep_checks["sounddevice"] and dep_checks["openwakeword"]:
-        checks.append(DoctorCheck("voice_stack", "ok", "sounddevice and openwakeword are available"))
-    else:
-        missing = [name for name in ("sounddevice", "openwakeword") if not dep_checks[name]]
         checks.append(
-            DoctorCheck("voice_stack", "warning", f"Voice mode is incomplete; missing {', '.join(missing)}")
+            DoctorCheck(
+                "voice_stack", "ok", "sounddevice and openwakeword are available"
+            )
+        )
+    else:
+        missing = [
+            name for name in ("sounddevice", "openwakeword") if not dep_checks[name]
+        ]
+        checks.append(
+            DoctorCheck(
+                "voice_stack",
+                "warning",
+                f"Voice mode is incomplete; missing {', '.join(missing)}",
+            )
         )
 
     stt_backend = settings.stt_backend.strip().lower()
     if stt_backend == "apple":
         if dep_checks["SpeechRecognition"]:
-            checks.append(DoctorCheck("stt_backend", "ok", "Apple SpeechRecognition is available"))
+            checks.append(
+                DoctorCheck("stt_backend", "ok", "Apple SpeechRecognition is available")
+            )
         elif dep_checks["faster_whisper"]:
             checks.append(
                 DoctorCheck(
@@ -160,8 +187,22 @@ def collect_doctor_checks(*, settings: config.Settings) -> list[DoctorCheck]:
             else "Whisper backend selected but faster_whisper is not installed"
         )
         checks.append(DoctorCheck("stt_backend", status, detail))
+    elif stt_backend == "parakeet":
+        status = "ok" if dep_checks["nano_parakeet"] else "error"
+        detail = (
+            "Parakeet V3 is available"
+            if dep_checks["nano_parakeet"]
+            else "Parakeet selected but nano-parakeet is not installed"
+        )
+        checks.append(DoctorCheck("stt_backend", status, detail))
     else:
-        checks.append(DoctorCheck("stt_backend", "warning", f"Unknown STT backend '{settings.stt_backend}'"))
+        checks.append(
+            DoctorCheck(
+                "stt_backend",
+                "warning",
+                f"Unknown STT backend '{settings.stt_backend}'",
+            )
+        )
 
     if settings.agent_enabled:
         missing = [name for name in ("ddgs",) if not dep_checks[name]]
@@ -174,14 +215,28 @@ def collect_doctor_checks(*, settings: config.Settings) -> list[DoctorCheck]:
                 )
             )
         else:
-            checks.append(DoctorCheck("agent_mode", "ok", "Agent mode has its core web dependency available"))
+            checks.append(
+                DoctorCheck(
+                    "agent_mode",
+                    "ok",
+                    "Agent mode has its core web dependency available",
+                )
+            )
 
-    raw_safe_roots = tuple(getattr(settings, "local_artifact_safe_roots", ("./", "~")) or ("./", "~"))
+    raw_safe_roots = tuple(
+        getattr(settings, "local_artifact_safe_roots", ("./", "~")) or ("./", "~")
+    )
     safe_roots = [Path(root).expanduser() for root in raw_safe_roots]
     if not safe_roots:
-        checks.append(DoctorCheck("local_artifact_roots", "error", "No safe roots configured"))
+        checks.append(
+            DoctorCheck("local_artifact_roots", "error", "No safe roots configured")
+        )
     else:
-        readable = [str(root) for root in safe_roots if root.exists() and os.access(root, os.R_OK)]
+        readable = [
+            str(root)
+            for root in safe_roots
+            if root.exists() and os.access(root, os.R_OK)
+        ]
         if readable:
             checks.append(
                 DoctorCheck(
@@ -230,7 +285,13 @@ def collect_doctor_checks(*, settings: config.Settings) -> list[DoctorCheck]:
             )
         )
     elif on_macos:
-        checks.append(DoctorCheck("apple_automation", "warning", "osascript is unavailable on this macOS install"))
+        checks.append(
+            DoctorCheck(
+                "apple_automation",
+                "warning",
+                "osascript is unavailable on this macOS install",
+            )
+        )
     else:
         checks.append(
             DoctorCheck(
@@ -250,20 +311,24 @@ def collect_agent_doctor_checks(*, settings: config.Settings) -> list[DoctorChec
     checks: list[DoctorCheck] = []
     mode = str(getattr(settings, "agent_policy_mode", "strict")).strip().lower()
     if valid_policy_mode(mode):
-        checks.append(DoctorCheck("agent_policy_mode", "ok", f"Configured mode '{mode}'"))
+        checks.append(
+            DoctorCheck("agent_policy_mode", "ok", f"Configured mode '{mode}'")
+        )
     else:
         checks.append(
             DoctorCheck(
                 "agent_policy_mode",
                 "error",
-                f"Unsupported mode '{mode}'. Expected strict, hybrid, or owner_fast.",
+                f"Unsupported mode '{mode}'. Expected strict, hybrid, owner_fast, or interactive.",
             )
         )
 
     raw_tiers = getattr(settings, "agent_approval_required_tiers", ())
     if not isinstance(raw_tiers, tuple):
         raw_tiers = tuple(raw_tiers) if isinstance(raw_tiers, list) else ()
-    normalized_tiers = tuple(sorted({str(t).strip().lower() for t in raw_tiers if str(t).strip()}))
+    normalized_tiers = tuple(
+        sorted({str(t).strip().lower() for t in raw_tiers if str(t).strip()})
+    )
     invalid_tiers = [tier for tier in normalized_tiers if not valid_risk_tier(tier)]
     if invalid_tiers:
         checks.append(
@@ -280,13 +345,23 @@ def collect_agent_doctor_checks(*, settings: config.Settings) -> list[DoctorChec
     try:
         store = ApprovalStore(_memory_db_path(settings=settings))
         count = store.count_entries()
-        checks.append(DoctorCheck("agent_approvals_store", "ok", f"{count} persisted approval(s)"))
+        checks.append(
+            DoctorCheck("agent_approvals_store", "ok", f"{count} persisted approval(s)")
+        )
     except Exception as exc:
-        checks.append(DoctorCheck("agent_approvals_store", "error", f"Unable to access approvals store: {exc}"))
+        checks.append(
+            DoctorCheck(
+                "agent_approvals_store",
+                "error",
+                f"Unable to access approvals store: {exc}",
+            )
+        )
     return checks
 
 
-def format_doctor_report(*, settings: config.Settings, include_agent: bool = False) -> str:
+def format_doctor_report(
+    *, settings: config.Settings, include_agent: bool = False
+) -> str:
     lines = [
         "Kage doctor",
         f"- backend: {settings.llm_backend}",
@@ -345,7 +420,9 @@ def run_approvals_grant(
     return 0
 
 
-def run_approvals_revoke(*, settings: config.Settings, scope_kind: str, scope_name: str) -> int:
+def run_approvals_revoke(
+    *, settings: config.Settings, scope_kind: str, scope_name: str
+) -> int:
     from core.platform.storage import ApprovalStore
 
     store = ApprovalStore(_memory_db_path(settings=settings))
@@ -354,6 +431,38 @@ def run_approvals_revoke(*, settings: config.Settings, scope_kind: str, scope_na
         print(f"Revoked approval: {scope_kind}:{scope_name}")
     else:
         print(f"No approval found for: {scope_kind}:{scope_name}")
+    return 0
+
+
+def run_memory_stats(*, settings: config.Settings) -> int:
+    from core.platform.storage import ConversationStore, EvidenceStore, TraceStore
+
+    db_path = _memory_db_path(settings=settings)
+    conversations = ConversationStore(db_path).count()
+    evidence = EvidenceStore(db_path).count()
+    traces = TraceStore(db_path).count()
+    print("Kage memory stats")
+    print(f"- conversations: {conversations}")
+    print(f"- evidence:      {evidence}")
+    print(f"- traces:        {traces}")
+    print(f"- db:            {db_path}")
+    return 0
+
+
+def run_memory_prune(
+    *,
+    settings: config.Settings,
+    keep_conversations: int,
+    keep_evidence: int,
+    keep_traces: int,
+) -> int:
+    from core.platform.storage import ConversationStore, EvidenceStore, TraceStore
+
+    db_path = _memory_db_path(settings=settings)
+    deleted_c = ConversationStore(db_path).prune(keep_conversations)
+    deleted_e = EvidenceStore(db_path).prune(keep_evidence)
+    deleted_t = TraceStore(db_path).prune(keep_traces)
+    print(f"Pruned {deleted_c} conversation(s), {deleted_e} evidence record(s), {deleted_t} trace(s)")
     return 0
 
 
@@ -429,40 +538,113 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     chat = subparsers.add_parser("chat", help="Launch the text chat UI")
-    chat.add_argument("--plain", action="store_true", help="Use the plain terminal fallback instead of Textual")
-    chat.add_argument("--timing", action="store_true", help="Show throughput metrics in the chat UI")
+    chat.add_argument(
+        "--plain",
+        action="store_true",
+        help="Use the plain terminal fallback instead of Textual",
+    )
+    chat.add_argument(
+        "--timing", action="store_true", help="Show throughput metrics in the chat UI"
+    )
 
     voice = subparsers.add_parser("voice", help="Launch voice mode")
-    voice.add_argument("--timing", action="store_true", help="Print latency breakdown after each response")
+    voice.add_argument(
+        "--timing",
+        action="store_true",
+        help="Print latency breakdown after each response",
+    )
 
-    bench = subparsers.add_parser("bench", help="Run inference benchmark without TTS and exit")
+    bench = subparsers.add_parser(
+        "bench", help="Run inference benchmark without TTS and exit"
+    )
     bench.add_argument("--timing", action="store_true", help=argparse.SUPPRESS)
-    doctor = subparsers.add_parser("doctor", help="Print environment and dependency diagnostics")
-    doctor.add_argument("--agent", action="store_true", help="Include agent policy and approval diagnostics")
+    doctor = subparsers.add_parser(
+        "doctor", help="Print environment and dependency diagnostics"
+    )
+    doctor.add_argument(
+        "--agent",
+        action="store_true",
+        help="Include agent policy and approval diagnostics",
+    )
 
-    approvals = subparsers.add_parser("approvals", help="Manage policy approvals for autonomous actions")
-    approvals_subparsers = approvals.add_subparsers(dest="approvals_command", required=True)
+    approvals = subparsers.add_parser(
+        "approvals", help="Manage policy approvals for autonomous actions"
+    )
+    approvals_subparsers = approvals.add_subparsers(
+        dest="approvals_command", required=True
+    )
     approvals_subparsers.add_parser("list", help="List granted approvals")
-    approvals_grant = approvals_subparsers.add_parser("grant", help="Grant approval for a tool or tier")
-    approvals_grant.add_argument("scope_kind", choices=["tool", "tier"], help="Approval scope kind")
+    approvals_grant = approvals_subparsers.add_parser(
+        "grant", help="Grant approval for a tool or tier"
+    )
+    approvals_grant.add_argument(
+        "scope_kind", choices=["tool", "tier"], help="Approval scope kind"
+    )
     approvals_grant.add_argument("scope_name", help="Tool name or risk tier")
-    approvals_grant.add_argument("--note", default="manual_cli", help="Optional audit note")
-    approvals_revoke = approvals_subparsers.add_parser("revoke", help="Revoke approval for a tool or tier")
-    approvals_revoke.add_argument("scope_kind", choices=["tool", "tier"], help="Approval scope kind")
+    approvals_grant.add_argument(
+        "--note", default="manual_cli", help="Optional audit note"
+    )
+    approvals_revoke = approvals_subparsers.add_parser(
+        "revoke", help="Revoke approval for a tool or tier"
+    )
+    approvals_revoke.add_argument(
+        "scope_kind", choices=["tool", "tier"], help="Approval scope kind"
+    )
     approvals_revoke.add_argument("scope_name", help="Tool name or risk tier")
 
-    backup = subparsers.add_parser("backup", help="Create or verify local state backups")
+    memory = subparsers.add_parser("memory", help="Inspect and prune local memory stores")
+    memory_subparsers = memory.add_subparsers(dest="memory_command", required=True)
+    memory_subparsers.add_parser("stats", help="Print row counts for each memory store")
+    memory_prune = memory_subparsers.add_parser(
+        "prune", help="Delete oldest records, keeping only the N most recent"
+    )
+    memory_prune.add_argument(
+        "--keep-conversations",
+        type=int,
+        default=5000,
+        help="Conversations to keep (default: 5000)",
+    )
+    memory_prune.add_argument(
+        "--keep-evidence",
+        type=int,
+        default=5000,
+        help="Evidence records to keep (default: 5000)",
+    )
+    memory_prune.add_argument(
+        "--keep-traces",
+        type=int,
+        default=5000,
+        help="Trace records to keep (default: 5000)",
+    )
+
+    backup = subparsers.add_parser(
+        "backup", help="Create or verify local state backups"
+    )
     backup_subparsers = backup.add_subparsers(dest="backup_command", required=True)
-    backup_create = backup_subparsers.add_parser("create", help="Create a compressed local backup archive")
-    backup_create.add_argument("--output", help="Optional output archive path (.tar.gz)")
-    backup_verify = backup_subparsers.add_parser("verify", help="Verify a local backup archive")
+    backup_create = backup_subparsers.add_parser(
+        "create", help="Create a compressed local backup archive"
+    )
+    backup_create.add_argument(
+        "--output", help="Optional output archive path (.tar.gz)"
+    )
+    backup_verify = backup_subparsers.add_parser(
+        "verify", help="Verify a local backup archive"
+    )
     backup_verify.add_argument("archive", help="Path to the backup archive to verify")
 
-    service = subparsers.add_parser("service", help="Manage launchd voice daemon on macOS")
+    service = subparsers.add_parser(
+        "service", help="Manage launchd voice daemon on macOS"
+    )
     service_subparsers = service.add_subparsers(dest="service_command", required=True)
-    service_subparsers.add_parser("install", help="Install and start the launchd voice service")
-    service_subparsers.add_parser("uninstall", help="Stop and remove the launchd voice service")
-    service_subparsers.add_parser("start", help="Start the installed launchd voice service")
+    service_subparsers.add_parser(
+        "install", help="Install and start the launchd voice service"
+    )
+    service_subparsers.add_parser(
+        "uninstall", help="Stop and remove the launchd voice service"
+    )
+    service_subparsers.add_parser(
+        "start", help="Start the installed launchd voice service"
+    )
     service_subparsers.add_parser("stop", help="Stop the launchd voice service")
     service_subparsers.add_parser("status", help="Show launchd voice service status")
     return parser
@@ -479,7 +661,16 @@ def normalize_legacy_argv(argv: Sequence[str]) -> list[str]:
     if args[0].startswith("-"):
         # Preserve global argparse behavior for flags like --help.
         return args
-    if args and args[0] in {"chat", "voice", "bench", "doctor", "approvals", "backup", "service"}:
+    if args and args[0] in {
+        "chat",
+        "voice",
+        "bench",
+        "doctor",
+        "approvals",
+        "memory",
+        "backup",
+        "service",
+    }:
         return args
     return ["voice", *args]
 
@@ -498,7 +689,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             launch_textual_chat(settings=settings, timing=args.timing)
         except ImportError:
-            print("Textual UI is unavailable. Install dependencies with: pip install -r requirements.txt")
+            print(
+                "Textual UI is unavailable. Install dependencies with: pip install -r requirements.txt"
+            )
             return 1
         return 0
 
@@ -528,9 +721,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         return 0
 
+    if args.command == "memory":
+        if args.memory_command == "stats":
+            return run_memory_stats(settings=settings)
+        if args.memory_command == "prune":
+            return run_memory_prune(
+                settings=settings,
+                keep_conversations=args.keep_conversations,
+                keep_evidence=args.keep_evidence,
+                keep_traces=args.keep_traces,
+            )
+        return 0
+
     if args.command == "backup":
         if args.backup_command == "create":
-            return run_backup_create(settings=settings, output=getattr(args, "output", None))
+            return run_backup_create(
+                settings=settings, output=getattr(args, "output", None)
+            )
         if args.backup_command == "verify":
             return run_backup_verify(archive=args.archive)
         parser.error("backup requires a subcommand")

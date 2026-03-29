@@ -84,6 +84,60 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason_code, "policy_unknown_tool")
 
+    # ------------------------------------------------------------------
+    # owner_fast mode — all tiers should be pre-approved
+    # ------------------------------------------------------------------
+
+    def test_owner_fast_required_tiers_is_empty(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "memory.db"
+            engine = self._engine(db_path=db_path, mode="owner_fast")
+            self.assertEqual(engine.required_tiers(), set())
+
+    def test_owner_fast_allows_safe_read_tools(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "memory.db"
+            engine = self._engine(db_path=db_path, mode="owner_fast")
+            for tool in ("web_search", "web_fetch", "local_read_text"):
+                with self.subTest(tool=tool):
+                    decision = engine.evaluate(tool_name=tool, args={})
+                    self.assertTrue(decision.allowed)
+                    self.assertFalse(decision.requires_approval)
+
+    def test_owner_fast_allows_moderate_change_tools(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "memory.db"
+            engine = self._engine(db_path=db_path, mode="owner_fast")
+            for tool in ("reminder_add", "notify", "update_fact"):
+                with self.subTest(tool=tool):
+                    decision = engine.evaluate(tool_name=tool, args={})
+                    self.assertTrue(decision.allowed)
+                    self.assertFalse(decision.requires_approval)
+
+    def test_owner_fast_allows_high_impact_without_store_approval(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "memory.db"
+            engine = self._engine(db_path=db_path, mode="owner_fast")
+            decision = engine.evaluate(tool_name="shell", args={"command": "echo hi"})
+            self.assertTrue(decision.allowed)
+            self.assertFalse(decision.requires_approval)
+            self.assertEqual(decision.reason_code, "policy_allowed")
+
+    def test_owner_fast_does_not_consult_approval_store(self) -> None:
+        """owner_fast bypasses the approval store entirely."""
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "memory.db"
+            store = ApprovalStore(db_path)
+            # Do NOT grant any approvals — should still be allowed
+            settings = SimpleNamespace(
+                agent_policy_mode="owner_fast",
+                agent_approval_required_tiers=("moderate_change", "high_impact"),
+            )
+            engine = PolicyEngine(settings=settings, approval_store=store)
+            decision = engine.evaluate(tool_name="shell_mutation", args={})
+            self.assertTrue(decision.allowed)
+            self.assertFalse(decision.requires_approval)
+
 
 if __name__ == "__main__":
     unittest.main()

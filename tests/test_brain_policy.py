@@ -122,14 +122,14 @@ class BrainPolicyTests(unittest.TestCase):
 
     def test_text_mode_prompt_allows_structured_output(self) -> None:
         brain = BrainService.__new__(BrainService)
-        brain.settings = SimpleNamespace(user_name="Imad")
+        brain.settings = SimpleNamespace(user_name="Imad", assistant_name="Kage")
 
         prompt = brain._system_prompt(text_mode=True)
         self.assertIn("Markdown, code blocks, and lists are allowed.", prompt)
 
     def test_system_prompt_allows_general_knowledge(self) -> None:
         brain = BrainService.__new__(BrainService)
-        brain.settings = SimpleNamespace(user_name="Imad")
+        brain.settings = SimpleNamespace(user_name="Imad", assistant_name="Kage")
 
         prompt = brain._system_prompt(text_mode=False)
         self.assertIn("general world knowledge", prompt)

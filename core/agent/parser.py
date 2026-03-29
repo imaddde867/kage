@@ -18,6 +18,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from core.agent.tool_aliases import TOOL_ALIASES as _TOOL_ALIASES
 from core.agent.tool_base import ToolCall
 
 _THOUGHT_RE = re.compile(r"<thought>(.*?)</thought>", re.DOTALL | re.IGNORECASE)
@@ -33,28 +34,6 @@ _TOOL_INLINE_OPEN_RE = re.compile(
     r"<tool>\s*([A-Za-z0-9_]+)\s+([^>\n]+?)>",
     re.DOTALL | re.IGNORECASE,
 )
-
-_TOOL_ALIASES: dict[str, str] = {
-    "search": "web_search",
-    "web_search": "web_search",
-    "fetch": "web_fetch",
-    "web_fetch": "web_fetch",
-    "calendar": "calendar_read",
-    "reminder": "reminder_add",
-    "shell": "shell",
-    "notify": "notify",
-    "speak": "speak",
-    "local_find_files": "local_find_files",
-    "local_read_text": "local_read_text",
-    "local_extract_pdf": "local_extract_pdf",
-    "local_extract_docx": "local_extract_docx",
-    "local_extract_sheet": "local_extract_sheet",
-    "find_file": "local_find_files",
-    "read_file": "local_read_text",
-    "extract_pdf": "local_extract_pdf",
-    "extract_docx": "local_extract_docx",
-    "extract_sheet": "local_extract_sheet",
-}
 
 _ALT_BODY_RE = re.compile(
     r"<(" + "|".join(re.escape(k) for k in _TOOL_ALIASES) + r")>(.*?)</\1>",

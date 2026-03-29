@@ -541,7 +541,8 @@ class LocalReadTextTool(_LocalArtifactTool):
         resolved, err = self._resolve_file(path)
         if err is not None:
             return err
-        assert resolved is not None
+        if resolved is None:
+            return self._error("path resolution failed unexpectedly")
 
         suffix = resolved.suffix.lower()
         if suffix in _PDF_EXTENSIONS:
@@ -631,7 +632,8 @@ class LocalExtractPdfTool(_LocalArtifactTool):
         resolved, err = self._resolve_file(path)
         if err is not None:
             return err
-        assert resolved is not None
+        if resolved is None:
+            return self._error("path resolution failed unexpectedly")
 
         if resolved.suffix.lower() not in _PDF_EXTENSIONS:
             return self._error(
@@ -723,7 +725,8 @@ class LocalExtractDocxTool(_LocalArtifactTool):
         resolved, err = self._resolve_file(path)
         if err is not None:
             return err
-        assert resolved is not None
+        if resolved is None:
+            return self._error("path resolution failed unexpectedly")
 
         if resolved.suffix.lower() not in _DOCX_EXTENSIONS:
             return self._error(
@@ -819,7 +822,8 @@ class LocalExtractSheetTool(_LocalArtifactTool):
         resolved, err = self._resolve_file(path)
         if err is not None:
             return err
-        assert resolved is not None
+        if resolved is None:
+            return self._error("path resolution failed unexpectedly")
 
         suffix = resolved.suffix.lower()
         if suffix not in _SHEET_EXTENSIONS:
