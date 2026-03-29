@@ -49,7 +49,17 @@ class CapabilityCatalog:
             requires_confirmation = False
             supports_citation = name in {"web_search", "web_fetch"}
             freshness = "static"
-            if name in {"web_search", "web_fetch", "calendar_read", "shell"}:
+            if name in {
+                "web_search",
+                "web_fetch",
+                "calendar_read",
+                "shell",
+                "local_find_files",
+                "local_read_text",
+                "local_extract_pdf",
+                "local_extract_docx",
+                "local_extract_sheet",
+            }:
                 freshness = "live"
             if name in {"reminder_add", "notify", "speak", "shell_mutation", "mark_task_done", "update_fact"}:
                 side_effect = SideEffectLevel.LOCAL_MUTATION

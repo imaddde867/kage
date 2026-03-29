@@ -30,3 +30,8 @@ httpx
 trafilatura
 # JS-rendering browser fetch (optional; after install run: playwright install chromium)
 playwright
+
+# Local artifact extraction (PDF/DOCX/XLSX)
+pypdf
+python-docx
+openpyxl

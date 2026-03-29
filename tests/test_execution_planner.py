@@ -116,6 +116,25 @@ class ExecutionPlannerTests(unittest.TestCase):
         self.assertEqual(intent.risk_tier, RiskTier.SAFE_READ)
         self.assertFalse(intent.requires_approval)
 
+    def test_build_execution_intent_marks_local_artifact_request_as_safe_read(self) -> None:
+        catalog = CapabilityCatalog.build(
+            settings=self.settings,
+            tool_names=["local_find_files", "local_extract_pdf"],
+        )
+        decision = self.planner.plan(
+            user_input="There is a PDF called Lasku in Downloads, check specs.",
+            agent_enabled=True,
+            catalog=catalog,
+            classify_ambiguous=lambda _text: True,
+        )
+        intent = self.planner.build_execution_intent(
+            user_input="There is a PDF called Lasku in Downloads, check specs.",
+            decision=decision,
+            required_approval_tiers=("moderate_change", "high_impact"),
+        )
+        self.assertEqual(intent.risk_tier, RiskTier.SAFE_READ)
+        self.assertFalse(intent.requires_approval)
+
     def test_build_execution_intent_requires_approval_when_tier_is_configured(self) -> None:
         catalog = CapabilityCatalog.build(
             settings=self.settings,

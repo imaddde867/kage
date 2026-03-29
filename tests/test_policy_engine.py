@@ -68,6 +68,14 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertTrue(decision.allowed)
         self.assertFalse(decision.requires_approval)
 
+    def test_strict_mode_allows_local_safe_read_without_approval(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "memory.db"
+            engine = self._engine(db_path=db_path, mode="strict")
+            decision = engine.evaluate(tool_name="local_extract_pdf", args={"path": "~/Downloads/Lasku.pdf"})
+        self.assertTrue(decision.allowed)
+        self.assertFalse(decision.requires_approval)
+
     def test_unknown_tool_is_blocked(self) -> None:
         with TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "memory.db"

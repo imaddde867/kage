@@ -22,6 +22,10 @@ notify.py           macOS system notification (NotifyTool) and
 shell.py            Read-only shell connector (`shell`) plus gated mutation
                     connector (`shell_mutation`) with explicit confirmation.
 
+local_artifacts.py  Read-only local file discovery and extraction:
+                      local_find_files, local_read_text,
+                      local_extract_pdf, local_extract_docx, local_extract_sheet
+
 apple_calendar.py   Read upcoming Calendar events and add Reminders,
                     both via osascript (macOS only).
 
