@@ -112,6 +112,7 @@ def build_messages(
     recent_turns: list[tuple[str, str]],
     policy_note: str,
     entity_context: str = "",
+    vault_context: str = "",
     topic_hint: str = "",
     memory_recall_enabled: bool = True,
 ) -> list[dict[str, str]]:
@@ -130,6 +131,9 @@ def build_messages(
 
     if entity_context:
         system += f"\n\nKnown facts about {user_name}:\n{entity_context}"
+
+    if vault_context:
+        system += f"\n\n{vault_context}"
 
     if topic_hint:
         system += f"\n\nCurrent topic hint:\n{topic_hint}"
