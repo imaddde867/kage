@@ -59,8 +59,12 @@ def run_plain_chat(
         _drain_startup_events(controller)
         print(
             f"  {settings.assistant_name} plain chat. Type your message. '/quit' to exit. "
-            f"[backend: {settings.llm_backend} | model: {settings.mlx_model}]\n"
+            f"[backend: {settings.llm_backend} | model: {settings.mlx_model}]"
         )
+        vault = controller._brain.vault_stats_line()
+        if vault:
+            print(f"  [{vault}]")
+        print()
 
         while True:
             try:

@@ -109,7 +109,10 @@ class ToolRow(Static):
 
 
 class EmptyState(Static):
-    def set_content(self, *, assistant_name: str, backend: str, model: str) -> None:
+    def set_content(self, *, assistant_name: str, backend: str, model: str, vault_stats: str = "") -> None:
+        info_line = f"Backend: `{backend}`  Model: `{model}`"
+        if vault_stats:
+            info_line += f"  {vault_stats}"
         self.update(
             Panel(
                 RichMarkdown(
@@ -132,7 +135,7 @@ class EmptyState(Static):
                             "- `Ctrl+Y` copy last answer",
                             "- `Ctrl+N` new chat",
                             "",
-                            f"Backend: `{backend}`  Model: `{model}`",
+                            info_line,
                         ]
                     )
                 ),
@@ -474,6 +477,7 @@ class KageChatApp(App[None]):
             assistant_name=getattr(self.controller.settings, "assistant_name", "Kage"),
             backend=getattr(self.controller.settings, "llm_backend", "unknown"),
             model=getattr(self.controller.settings, "mlx_model", "unknown"),
+            vault_stats=self.controller._brain.vault_stats_line(),
         )
         transcript.mount(empty)
 

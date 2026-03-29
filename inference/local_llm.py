@@ -1,13 +1,12 @@
-"""Local LLM inference wrapper — MLX + TurboQuant.
+"""Local LLM inference wrapper — MLX.
 
-Wraps mlx_vlm (for VLM checkpoints like Qwen3.5) with TurboQuant KV
-cache monitoring and provides the same stream_raw() interface as Kage's
-GenerationRuntime so it can be swapped in via LLM_BACKEND config without
-touching brain.py.
+Wraps mlx_vlm (for VLM checkpoints like Qwen3.5) and provides the same
+stream_raw() interface as Kage's GenerationRuntime so it can be swapped
+in via LLM_BACKEND config without touching brain.py.
 
 Model:          mlx-community/Qwen3.5-9B-MLX-4bit  (VLM, pre-quantized)
 Expected perf:  ~15–25 tok/s, <2s TTFT for typical queries on M4 16GB
-RAM footprint:  ~4.5 GB weights + compressed KV (well within 16 GB)
+RAM footprint:  ~4.5 GB weights (well within 16 GB)
 
 Backend selection:
   Qwen3.5 is a VLM architecture — mlx_vlm is required.
@@ -20,7 +19,10 @@ Interface contract (matching GenerationRuntime.stream_raw):
 Extras:
     chat(messages, ...)  — apply chat template then stream
     embed(text)          — mean-pool token embeddings (no separate model)
-    last_stats           — tokens, tok_per_sec, ram_delta_gb, kv_bytes
+    last_stats           — tokens, tok_per_sec, ram_delta_gb
+
+# TODO: revisit KV cache compression when MLX adds cache hooks
+#       (see git history for turbo_quant.py — PolarQuant + QJL impl).
 """
 from __future__ import annotations
 
@@ -37,7 +39,7 @@ DEFAULT_MODEL_ID = "mlx-community/Qwen3.5-9B-MLX-4bit"
 
 
 class LocalLLM:
-    """MLX VLM-backed local LLM with TurboQuant KV cache compression.
+    """MLX VLM-backed local LLM.
 
     Lazy-loads the model on first call so import is always fast.
     """
@@ -46,12 +48,10 @@ class LocalLLM:
         self,
         model_id: str = DEFAULT_MODEL_ID,
         *,
-        kv_bits: int = 3,
         max_tokens: int = 2048,
         temperature: float = 0.0,
     ) -> None:
         self.model_id = model_id
-        self.kv_bits = kv_bits
         self.default_max_tokens = max_tokens
         self.default_temperature = temperature
         self.last_stats: dict[str, Any] = {}
@@ -120,8 +120,8 @@ class LocalLLM:
         load_time = time.perf_counter() - t0
         ram_delta = _ram_gb() - ram_before
         logger.info(
-            "[LocalLLM] Ready — load %.1fs, +%.2f GB RAM. TurboQuant KV: %d-bit.",
-            load_time, ram_delta, self.kv_bits,
+            "[LocalLLM] Ready — load %.1fs, +%.2f GB RAM.",
+            load_time, ram_delta,
         )
 
     # ------------------------------------------------------------------
@@ -145,9 +145,6 @@ class LocalLLM:
 
         tokens = max_tokens if max_tokens is not None else self.default_max_tokens
         temp = temperature if temperature is not None else self.default_temperature
-
-        from inference.turbo_quant import TurboQuantCache, TurboQuantConfig
-        kv_cache = TurboQuantCache(TurboQuantConfig(bits=self.kv_bits))
 
         total_tokens = 0
         pure_gen_s = 0.0
@@ -178,13 +175,11 @@ class LocalLLM:
         finally:
             if track_stats:
                 self.last_stats = {
-                    "backend": "mlx_vlm_turbo",
+                    "backend": "mlx_vlm",
                     "tokens": total_tokens,
                     "gen_seconds": pure_gen_s,
                     "tok_per_sec": total_tokens / pure_gen_s if pure_gen_s > 0 else 0.0,
                     "ram_delta_gb": _ram_gb() - ram_before,
-                    "kv_compressed_bytes": kv_cache.memory_bytes,
-                    "kv_tokens": len(kv_cache),
                 }
 
     # ------------------------------------------------------------------
@@ -259,15 +254,11 @@ class LocalLLM:
 _local_llm: LocalLLM | None = None
 
 
-def get_local_llm(
-    model_id: str = DEFAULT_MODEL_ID,
-    *,
-    kv_bits: int = 3,
-) -> LocalLLM:
+def get_local_llm(model_id: str = DEFAULT_MODEL_ID) -> LocalLLM:
     """Return (and lazily create) the process-wide LocalLLM instance."""
     global _local_llm
     if _local_llm is None:
-        _local_llm = LocalLLM(model_id, kv_bits=kv_bits)
+        _local_llm = LocalLLM(model_id)
     return _local_llm
 
 

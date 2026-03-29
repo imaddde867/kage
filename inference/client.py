@@ -33,11 +33,9 @@ class KageLLMClient:
         cloud_runtime: Any,
         *,
         local_model_id: str | None = None,
-        kv_bits: int = 3,
     ) -> None:
         self._cloud = cloud_runtime
         self._local_model_id = local_model_id  # None → DEFAULT_MODEL_ID
-        self._kv_bits = kv_bits
         self._local: Any | None = None  # lazy
 
     # ------------------------------------------------------------------
@@ -48,11 +46,8 @@ class KageLLMClient:
         if self._local is None:
             from inference.local_llm import get_local_llm
 
-            kwargs: dict[str, Any] = {"kv_bits": self._kv_bits}
-            if self._local_model_id:
-                kwargs["model_id"] = self._local_model_id
             logger.info("[llm_client] Loading local Qwen3.5-9B …")
-            self._local = get_local_llm(**kwargs)
+            self._local = get_local_llm(self._local_model_id) if self._local_model_id else get_local_llm()
             self._local.load()
         return self._local
 

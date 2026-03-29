@@ -1,1 +1,1 @@
-"""NeuroCache inference layer — TurboQuant KV cache + local LLM wrapper."""
+"""NeuroCache inference layer — local LLM wrapper for MLX."""

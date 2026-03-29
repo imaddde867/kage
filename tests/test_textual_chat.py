@@ -15,6 +15,11 @@ except ImportError:  # pragma: no cover - optional dependency in local env
     KageChatApp = None  # type: ignore[assignment]
 
 
+class _FakeBrain:
+    def vault_stats_line(self) -> str:
+        return ""
+
+
 class _FakeController:
     def __init__(self) -> None:
         self.settings = SimpleNamespace(
@@ -26,6 +31,7 @@ class _FakeController:
         )
         self.is_busy = False
         self.last_answer = ""
+        self._brain = _FakeBrain()
         self._events: list[SessionEvent] = []
         self._sources: list[str] = []
         self.reset_calls = 0
