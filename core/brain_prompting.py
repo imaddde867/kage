@@ -133,7 +133,11 @@ def build_messages(
         system += f"\n\nKnown facts about {user_name}:\n{entity_context}"
 
     if vault_context:
-        system += f"\n\n{vault_context}"
+        system += (
+            f"\n\nVault notes (pre-retrieved from {user_name}'s Obsidian vault — "
+            f"treat as primary source of truth; prefer this over general knowledge):\n\n"
+            f"{vault_context}"
+        )
 
     if topic_hint:
         system += f"\n\nCurrent topic hint:\n{topic_hint}"
