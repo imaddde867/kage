@@ -151,3 +151,44 @@ def search_code(req: SearchCodeRequest):
 def code_stats():
     """Return counts of indexed code nodes."""
     return store.get_code_stats()
+
+
+# ── Indexing endpoint ────────────────────────────────────────────────
+
+
+class IndexRequest(BaseModel):
+    vault_path: str
+
+
+@app.post("/api/index")
+def index_vault(req: IndexRequest):
+    """Re-index an Obsidian vault in-process (no server restart needed)."""
+    from pathlib import Path
+    from ingestion.parser import parse_markdown
+
+    vault = Path(req.vault_path).expanduser()
+    if not vault.exists():
+        return {"ok": False, "error": f"Vault not found: {vault}"}
+
+    skip_dirs = {"00-inbox", "06-templates", ".obsidian", ".trash"}
+    md_files = [
+        f for f in vault.rglob("*.md")
+        if not any(s in f.parts for s in skip_dirs)
+    ]
+
+    indexed, errors = 0, 0
+    for f in md_files:
+        try:
+            note = parse_markdown(f)
+            if not note.content.strip():
+                continue
+            embedding = engine.embed(note.content[:1000])
+            store.upsert_note(note, embedding)
+            indexed += 1
+        except Exception:
+            errors += 1
+
+    # Rebuild BM25 index with fresh data
+    engine._bm25.build(store.collection)
+
+    return {"ok": True, "indexed": indexed, "errors": errors, "vault": str(vault)}
