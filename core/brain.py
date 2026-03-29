@@ -131,7 +131,7 @@ class BrainService:
         self._runtime = GenerationRuntime(settings=self.settings)
         self.last_stats = self._runtime.last_stats
 
-        if getattr(self.settings, "second_brain_enabled", True):
+        if self.settings.second_brain_enabled:
             from core.second_brain.entity_store import EntityStore
             from core.second_brain.llm_extractor import LLMEntityExtractor
             from core.second_brain.planner import IntentRouter
@@ -271,10 +271,20 @@ class BrainService:
         except ImportError:
             logger.debug("apple_calendar connector unavailable")
 
+        if self.settings.neurocache_enabled:
+            try:
+                from connectors.neurocache_connector import VaultSearchTool
+                registry.register(VaultSearchTool(
+                    self.settings.neurocache_api_url,
+                    self.settings.neurocache_vault_inbox,
+                ))
+            except Exception:
+                logger.debug("neurocache vault_search tool unavailable")
+
         return registry
 
     def _system_prompt(self, *, text_mode: bool = False) -> str:
-        assistant_name = getattr(self.settings, "assistant_name", "Kage")
+        assistant_name = self.settings.assistant_name
         return build_system_prompt(
             self.settings.user_name,
             assistant_name=assistant_name,
@@ -368,14 +378,14 @@ class BrainService:
             planned_mode = str(getattr(active_plan, "entity_mode", "")).strip().lower()
             if planned_mode == "full":
                 entity_context = self._entity_store.recall_for_prompt(
-                    char_budget=getattr(active_plan, "char_budget", getattr(self.settings, "entity_recall_budget", 400))
+                    char_budget=getattr(active_plan, "char_budget", self.settings.entity_recall_budget)
                 )
             elif planned_mode == "personal_only":
                 entity_context = self._entity_store.recall_personal_context()
             elif route is not None and route.inject_entities:
                 # Full context: tasks + commitments + profile + preferences
                 entity_context = self._entity_store.recall_for_prompt(
-                    char_budget=getattr(self.settings, "entity_recall_budget", 400)
+                    char_budget=self.settings.entity_recall_budget
                 )
             else:
                 # Always inject profile + preferences for personal coherence
@@ -387,15 +397,27 @@ class BrainService:
                 getattr(active_plan, "include_memory_recall", memory_recall_enabled)
             )
 
+        vault_context = ""
+        if self.settings.neurocache_enabled:
+            try:
+                from connectors.neurocache_connector import get_connector
+                vault_context = get_connector(
+                    self.settings.neurocache_api_url,
+                    self.settings.neurocache_vault_inbox,
+                ).retrieve_context(user_input)
+            except Exception:
+                logger.debug("[neurocache] context retrieval failed", exc_info=True)
+
         return build_messages(
             user_input=user_input,
             user_name=self.settings.user_name,
-            assistant_name=getattr(self.settings, "assistant_name", "Kage"),
+            assistant_name=self.settings.assistant_name,
             text_mode=text_mode,
             memory=self.memory,
             recent_turns=recent_turns,
             policy_note=policy_note,
             entity_context=entity_context,
+            vault_context=vault_context,
             topic_hint=derive_topic_hint(recent_turns),
             memory_recall_enabled=memory_recall_enabled,
         )
@@ -416,12 +438,12 @@ class BrainService:
         mode = (
             str(mode_override).strip().lower()
             if mode_override
-            else str(getattr(self.settings, "agent_entity_mode", "relevance_filtered")).strip().lower()
+            else self.settings.agent_entity_mode.strip().lower()
         )
         budget = (
             int(budget_override)
             if budget_override is not None
-            else int(getattr(self.settings, "entity_recall_budget", 400))
+            else self.settings.entity_recall_budget
         )
 
         if mode == "full":
@@ -521,7 +543,7 @@ class BrainService:
 
         if (
             exchange_id is not None
-            and getattr(self.settings, "extraction_enabled", True)
+            and self.settings.extraction_enabled
             and hasattr(self, "_entity_store")
             and should_extract
         ):
@@ -631,7 +653,7 @@ class BrainService:
             else ""
         )
         follow_up = "Enable AGENT_ENABLED=true in .env and restart Kage."
-        if "memory" in requested and not getattr(self.settings, "second_brain_enabled", False):
+        if "memory" in requested and not self.settings.second_brain_enabled:
             follow_up += " For memory/task tools also set SECOND_BRAIN_ENABLED=true."
         return (
             "I can't execute connector actions"
@@ -691,7 +713,9 @@ class BrainService:
         Yields string chunks exactly as think_stream does so callers
         (respond() in main.py) need no special handling for agent responses.
         """
-        assert self._agent_loop is not None
+        if self._agent_loop is None:
+            logger.error("agent_stream called but _agent_loop is None — agent not initialized")
+            return
         self._update_policy_state(user_input)
         self._notify_status("checking_tools", detail="Running agent workflow")
         entity_context = self._agent_entity_context(user_input)
@@ -777,10 +801,25 @@ class BrainService:
         if topic_hint:
             topic_line = f"Conversation topic: {topic_hint}"
             entity_context = f"{entity_context}\n{topic_line}".strip() if entity_context else topic_line
+
+        if self.settings.neurocache_enabled:
+            try:
+                from connectors.neurocache_connector import get_connector
+                vault_context = get_connector(
+                    self.settings.neurocache_api_url,
+                    self.settings.neurocache_vault_inbox,
+                ).retrieve_context(user_input)
+                if vault_context:
+                    entity_context = f"{entity_context}\n\n{vault_context}".strip() if entity_context else vault_context
+            except Exception:
+                logger.debug("[neurocache] agent context retrieval failed", exc_info=True)
+
         return entity_context
 
     def agent_runner(self, task: str, entity_context: str) -> Iterator[str]:
-        assert self._agent_loop is not None
+        if self._agent_loop is None:
+            logger.error("agent_runner called but _agent_loop is None — agent not initialized")
+            return
         self._update_policy_state(task)
         self._notify_status("checking_tools", detail="Executing tool plan")
         yield from self._agent_loop.run(task, context=entity_context)
