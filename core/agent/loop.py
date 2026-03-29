@@ -158,6 +158,7 @@ Rules:
 - When reporting web facts, always cite the source URL in your answer
 - Do not claim to have searched or fetched data unless a tool result supports it
 - If a tool fails, try an alternative or explain the limitation
+- VAULT NOTES: If relevant notes from the vault appear in "Known context" below, answer from them directly — do not call local_find_files or local_read_text to re-fetch them
 - Max {max_steps} steps
 
 {entity_context_block}"""
