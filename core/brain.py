@@ -130,6 +130,8 @@ class BrainService:
 
         self._runtime = GenerationRuntime(settings=self.settings)
         self.last_stats = self._runtime.last_stats
+        self._llm_client: Any = None
+        self._last_vault_injected: bool = False
 
         if self.settings.second_brain_enabled:
             from core.second_brain.entity_store import EntityStore
@@ -162,6 +164,15 @@ class BrainService:
         # accurate even when AGENT_ENABLED=false.
         if self._tool_registry is None:
             self._tool_registry = self._build_tool_registry()
+
+        # LLM router — LOCAL (Qwen3.5-9B) for vault/personal, CLOUD for general
+        if self.settings.neurocache_enabled and self._llm_client is None:
+            try:
+                from inference.client import KageLLMClient
+                self._llm_client = KageLLMClient(cloud_runtime=self._runtime)
+                logger.info("[llm_client] KageLLMClient initialized (LOCAL Qwen3.5-9B lazy)")
+            except Exception:
+                logger.debug("[llm_client] KageLLMClient unavailable, using cloud runtime", exc_info=True)
 
         # Initialize the agent loop after warmup so the tokenizer is available.
         if self.settings.agent_enabled and self._agent_loop is None:
@@ -408,6 +419,8 @@ class BrainService:
             except Exception:
                 logger.debug("[neurocache] context retrieval failed", exc_info=True)
 
+        self._last_vault_injected = bool(vault_context)
+
         return build_messages(
             user_input=user_input,
             user_name=self.settings.user_name,
@@ -490,8 +503,16 @@ class BrainService:
 
     def _stream_sentences(self, user_input: str, *, route: Any = None) -> Iterator[str]:
         prompt = self._build_prompt(user_input, text_mode=False, route=route)
+        intent = route.intent if route is not None else "GENERAL"
+        runtime = self._llm_client or self._runtime
+        stream_kwargs: dict[str, Any] = {}
+        if self._llm_client is not None:
+            stream_kwargs = {
+                "intent": intent,
+                "vault_context_injected": self._last_vault_injected,
+            }
         buffer = ""
-        for text in self._runtime.stream_raw(prompt):
+        for text in runtime.stream_raw(prompt, **stream_kwargs):
             buffer += text
             parts = _SENTENCE_END.split(buffer)
             for sentence in parts[:-1]:
@@ -504,7 +525,15 @@ class BrainService:
 
     def _stream_text(self, user_input: str, *, route: Any = None) -> Iterator[str]:
         prompt = self._build_prompt(user_input, text_mode=True, route=route)
-        yield from self._runtime.stream_raw(prompt)
+        intent = route.intent if route is not None else "GENERAL"
+        runtime = self._llm_client or self._runtime
+        stream_kwargs: dict[str, Any] = {}
+        if self._llm_client is not None:
+            stream_kwargs = {
+                "intent": intent,
+                "vault_context_injected": self._last_vault_injected,
+            }
+        yield from runtime.stream_raw(prompt, **stream_kwargs)
 
     def _extract_and_store(self, user_input: str, exchange_id: str) -> None:
         if not self._llm_extractor:
