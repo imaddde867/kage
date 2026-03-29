@@ -926,3 +926,19 @@ class BrainService:
             Request(text=user_input, text_mode=True, source="text"),
             runtime=self,
         )
+
+    def vault_stats_line(self) -> str:
+        """One-line vault summary for startup displays. Empty string if unavailable."""
+        if not self.settings.neurocache_enabled:
+            return ""
+        try:
+            from connectors.neurocache_connector import get_connector
+            stats = get_connector(
+                self.settings.neurocache_api_url,
+                self.settings.neurocache_vault_inbox,
+            ).get_stats()
+            if stats.get("status") == "offline":
+                return "vault: offline"
+            return f"vault: {stats.get('notes', 0)} notes, {stats.get('entities', 0)} entities"
+        except Exception:
+            return "vault: unavailable"

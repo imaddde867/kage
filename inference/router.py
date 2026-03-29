@@ -1,6 +1,6 @@
 """LLM router — decides LOCAL vs CLOUD for each request.
 
-LOCAL  = Qwen3.5-9B via TurboQuant MLX  (deep context, vault, personal)
+LOCAL  = Qwen3.5-9B via MLX  (deep context, vault, personal)
 CLOUD  = existing Kage GenerationRuntime (fast, tool-heavy, general)
 
 Routing table (first match wins):
@@ -35,7 +35,7 @@ _LONG_CONTEXT_TOKEN_THRESHOLD = 8_000
 
 
 class LLMBackend(Enum):
-    LOCAL = "local"   # Qwen3.5-9B, TurboQuant KV
+    LOCAL = "local"   # Qwen3.5-9B via MLX
     CLOUD = "cloud"   # existing GenerationRuntime (Qwen3-8B / mlx_vlm)
 
 

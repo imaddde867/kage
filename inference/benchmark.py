@@ -4,11 +4,9 @@ Run from the kage/ root:
     python -m inference.benchmark
 
 Expected on M4 + Qwen3.5-9B-4bit:
-  Load time:           8–12 s
-  Inference speed:     15–25 tok/s
-  RAM (model):         +~4.5 GB
-  RAM (KV, 200 tok):   <100 MB compressed   (vs ~600 MB uncompressed fp16)
-  TurboQuant ratio:    ~6x
+  Load time:       8–12 s
+  Inference speed: 15–25 tok/s
+  RAM (model):     +~4.5 GB
 
 Exits non-zero if any hard threshold is missed.
 """
@@ -37,11 +35,9 @@ def _fmt(label: str, value: str, width: int = 22) -> str:
 def benchmark(model_id: str | None = None) -> bool:
     """Run the benchmark. Returns True if all thresholds pass."""
     from inference.local_llm import LocalLLM, DEFAULT_MODEL_ID
-    from inference.turbo_quant import TurboQuantCache, TurboQuantConfig
-    import mlx.core as mx
 
     model = model_id or DEFAULT_MODEL_ID
-    llm = LocalLLM(model, kv_bits=3)
+    llm = LocalLLM(model)
 
     # ── Model load ───────────────────────────────────────────────────
     ram_before = _ram_gb()
@@ -71,17 +67,6 @@ def benchmark(model_id: str | None = None) -> bool:
     tok_per_sec = stats.get("tok_per_sec", 0.0)
     tokens = stats.get("tokens", 0)
 
-    # ── TurboQuant micro-benchmark ────────────────────────────────────
-    # Simulate 200-token cache with Qwen3.5-9B head dims (128 head_dim, 8 heads)
-    head_dim, n_heads = 128, 8
-    cache = TurboQuantCache(TurboQuantConfig(bits=3))
-    dummy_key = mx.random.normal((1, n_heads, 1, head_dim))
-    dummy_val = mx.random.normal((1, n_heads, 1, head_dim))
-    for _ in range(200):
-        cache.compress(dummy_key, dummy_val)
-    ratio = cache.compression_ratio
-    compressed_kb = cache.memory_bytes / 1024
-
     # ── Report ───────────────────────────────────────────────────────
     sep = "=" * 54
     print(f"\n{sep}")
@@ -92,9 +77,6 @@ def benchmark(model_id: str | None = None) -> bool:
     print(_fmt("KV RAM delta:", f"+{kv_ram:.3f} GB"))
     print(_fmt("Inference speed:", f"{tok_per_sec:.1f} tok/s  ({tokens} tokens)"))
     print(_fmt("Inference time:", f"{infer_time:.1f} s"))
-    print()
-    print(_fmt("TurboQuant ratio:", f"{ratio:.1f}x  (200-tok, {n_heads} heads)"))
-    print(_fmt("Compressed KV:", f"{compressed_kb:.1f} KB"))
     print()
     print("  Response preview:")
     print(f"    {str(response)[:120]}...")
@@ -107,8 +89,6 @@ def benchmark(model_id: str | None = None) -> bool:
         failures.append(f"Model RAM {model_ram:.2f} GB > 6.0 GB threshold")
     if tok_per_sec > 0 and tok_per_sec < 5.0:
         failures.append(f"Inference speed {tok_per_sec:.1f} tok/s < 5.0 tok/s threshold")
-    if ratio < 3.0:
-        failures.append(f"TurboQuant ratio {ratio:.1f}x < 3.0x threshold")
 
     if failures:
         print("\n  FAILED:")
