@@ -20,6 +20,7 @@ Test classes:
     TestMemoryOpTools      — mark_task_done, update_fact, list_open_tasks
     TestReminderAddTool    — AppleScript safety: quote escaping + date handling
 """
+
 import json
 import subprocess
 import tempfile
@@ -34,7 +35,7 @@ from connectors.memory_ops import (
     auto_mark_task_done_from_text,
 )
 from connectors.notify import NotifyTool, SpeakTool, _escape_as
-from connectors.shell import ShellTool
+from connectors.shell import ShellTool, ShellMutationTool
 from connectors.web_search import WebSearchTool
 from connectors.web_fetch import (
     WebFetchTool,
@@ -44,14 +45,18 @@ from connectors.web_fetch import (
     _is_domain_allowlisted,
 )
 from connectors.apple_calendar import (
-    ReminderAddTool, CalendarReadTool, _escape_as as _cal_escape_as,
-    _parse_due_datetime, _due_date_applescript,
+    ReminderAddTool,
+    CalendarReadTool,
+    _escape_as as _cal_escape_as,
+    _parse_due_datetime,
+    _due_date_applescript,
 )
 
 
 # ---------------------------------------------------------------------------
 # _escape_as (AppleScript escaping)
 # ---------------------------------------------------------------------------
+
 
 class TestEscapeAs(unittest.TestCase):
     """Verify the AppleScript string escaping helper used by notify and calendar connectors.
@@ -88,6 +93,7 @@ class TestEscapeAs(unittest.TestCase):
 # NotifyTool
 # ---------------------------------------------------------------------------
 
+
 class TestNotifyTool(unittest.TestCase):
     """Verify NotifyTool calls osascript correctly and handles all failure modes."""
 
@@ -122,7 +128,9 @@ class TestNotifyTool(unittest.TestCase):
 
     @patch(
         "subprocess.run",
-        side_effect=subprocess.CalledProcessError(1, "osascript", stderr=b"AppleScript error"),
+        side_effect=subprocess.CalledProcessError(
+            1, "osascript", stderr=b"AppleScript error"
+        ),
     )
     def test_osascript_error(self, _mock: MagicMock) -> None:
         """A non-zero osascript exit code returns an error ToolResult."""
@@ -133,6 +141,7 @@ class TestNotifyTool(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # SpeakTool
 # ---------------------------------------------------------------------------
+
 
 class TestSpeakTool(unittest.TestCase):
     """Verify SpeakTool delegates to core.speaker.speak() and surfaces errors."""
@@ -158,6 +167,7 @@ class TestSpeakTool(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # ShellTool
 # ---------------------------------------------------------------------------
+
 
 class TestShellTool(unittest.TestCase):
     """Verify ShellTool's three security layers: allowlist, metachar block, shell=False.
@@ -226,9 +236,43 @@ class TestShellTool(unittest.TestCase):
         self.assertIn("kage", result.content)
 
 
+class TestShellMutationTool(unittest.TestCase):
+    """Verify ShellMutationTool's confirmation token validation."""
+
+    def setUp(self) -> None:
+        self.tool = ShellMutationTool()
+
+    def test_missing_token_rejected(self) -> None:
+        """Missing confirm_token triggers rejection."""
+        result = self.tool.execute(
+            command="mkdir /tmp/test_kage_dir",
+            confirm_token="",
+        )
+        self.assertTrue(result.is_error)
+        self.assertIn("token", result.content.lower())
+
+    def test_invalid_token_rejected(self) -> None:
+        """Invalid confirm_token triggers rejection."""
+        result = self.tool.execute(
+            command="mkdir /tmp/test_kage_dir",
+            confirm_token="wrong_token",
+        )
+        self.assertTrue(result.is_error)
+        self.assertIn("token", result.content.lower())
+
+    def test_valid_token_allows_mkdir(self) -> None:
+        """Valid confirm_token allows mkdir on allowed list."""
+        result = self.tool.execute(
+            command="mkdir /tmp/test_kage_dir",
+            confirm_token="YES_I_UNDERSTAND_LOCAL_MUTATION",
+        )
+        self.assertFalse(result.is_error)
+
+
 # ---------------------------------------------------------------------------
 # WebSearchTool (mocked DDGS)
 # ---------------------------------------------------------------------------
+
 
 class TestWebSearchTool(unittest.TestCase):
     """Verify WebSearchTool formats results correctly and handles all failure modes.
@@ -244,7 +288,11 @@ class TestWebSearchTool(unittest.TestCase):
     def test_returns_results(self, mock_ddgs_cls: MagicMock) -> None:
         """Search results are returned as compact structured JSON."""
         mock_ddgs_cls.return_value.text.return_value = [
-            {"title": "Python 3.13", "body": "Released in October 2024.", "href": "https://python.org"},
+            {
+                "title": "Python 3.13",
+                "body": "Released in October 2024.",
+                "href": "https://python.org",
+            },
             {"title": "Release notes", "body": "Various improvements."},
         ]
         result = self.tool.execute(query="Python 3.13 release")
@@ -254,7 +302,9 @@ class TestWebSearchTool(unittest.TestCase):
         self.assertEqual(len(payload["results"]), 1)
         self.assertEqual(payload["results"][0]["url"], "https://python.org")
         self.assertIn("Python 3.13", payload["results"][0]["title"])
-        mock_ddgs_cls.return_value.text.assert_called_once_with("Python 3.13 release", max_results=5)
+        mock_ddgs_cls.return_value.text.assert_called_once_with(
+            "Python 3.13 release", max_results=5
+        )
 
     @patch("connectors.web_search._DDGS")
     def test_empty_query_returns_input_error(self, mock_ddgs_cls: MagicMock) -> None:
@@ -265,7 +315,9 @@ class TestWebSearchTool(unittest.TestCase):
         mock_ddgs_cls.return_value.text.assert_not_called()
 
     @patch("connectors.web_search._DDGS")
-    def test_non_string_query_returns_input_error(self, mock_ddgs_cls: MagicMock) -> None:
+    def test_non_string_query_returns_input_error(
+        self, mock_ddgs_cls: MagicMock
+    ) -> None:
         result = self.tool.execute(query=None)  # type: ignore[arg-type]
         self.assertTrue(result.is_error)
         self.assertIn("invalid search query", result.content.lower())
@@ -292,7 +344,9 @@ class TestWebSearchTool(unittest.TestCase):
         self.assertTrue(result.outcome.retryable)
 
     @patch("connectors.web_search._DDGS")
-    def test_retry_once_on_transient_error_then_success(self, mock_ddgs_cls: MagicMock) -> None:
+    def test_retry_once_on_transient_error_then_success(
+        self, mock_ddgs_cls: MagicMock
+    ) -> None:
         mock_ddgs_cls.return_value.text.side_effect = [
             ConnectionError("temporary network outage"),
             [{"title": "Recovered", "body": "ok", "href": "https://example.com"}],
@@ -308,7 +362,9 @@ class TestWebSearchTool(unittest.TestCase):
         """max_results is clamped so huge values don't explode request cost."""
         mock_ddgs_cls.return_value.text.return_value = []
         self.tool.execute(query="anything", max_results=999)
-        mock_ddgs_cls.return_value.text.assert_called_once_with("anything", max_results=10)
+        mock_ddgs_cls.return_value.text.assert_called_once_with(
+            "anything", max_results=10
+        )
 
     @patch("connectors.web_search._DDGS")
     def test_malformed_result_rows_are_ignored(self, mock_ddgs_cls: MagicMock) -> None:
@@ -327,7 +383,11 @@ class TestWebSearchTool(unittest.TestCase):
     def test_output_is_size_capped(self, mock_ddgs_cls: MagicMock) -> None:
         long_snippet = "A" * 2000
         mock_ddgs_cls.return_value.text.return_value = [
-            {"title": f"Result {idx}", "body": long_snippet, "href": f"https://example.com/{idx}"}
+            {
+                "title": f"Result {idx}",
+                "body": long_snippet,
+                "href": f"https://example.com/{idx}",
+            }
             for idx in range(1, 12)
         ]
         result = self.tool.execute(query="long query", max_results=10)
@@ -345,6 +405,7 @@ class TestWebSearchTool(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # WebFetchTool (Scrapling-first with fallback)
 # ---------------------------------------------------------------------------
+
 
 class TestWebFetchTool(unittest.TestCase):
     """Verify WebFetchTool uses Scrapling first and falls back safely."""
@@ -367,7 +428,9 @@ class TestWebFetchTool(unittest.TestCase):
         mock_fetcher.get.assert_called_once()
 
     @patch("connectors.web_fetch._ScraplingFetcher")
-    def test_scrapling_status_blocked_returns_error(self, mock_fetcher: MagicMock) -> None:
+    def test_scrapling_status_blocked_returns_error(
+        self, mock_fetcher: MagicMock
+    ) -> None:
         fake_response = MagicMock()
         fake_response.status_code = 403
         fake_response.url = "https://example.com/challenge"
@@ -380,10 +443,14 @@ class TestWebFetchTool(unittest.TestCase):
         self.assertIn("403", result.content)
 
     @patch("connectors.web_fetch._ScraplingFetcher")
-    def test_scrapling_js_challenge_returns_error(self, mock_fetcher: MagicMock) -> None:
+    def test_scrapling_js_challenge_returns_error(
+        self, mock_fetcher: MagicMock
+    ) -> None:
         fake_response = MagicMock()
         fake_response.url = "https://example.com/challenge"
-        fake_response.body = b"<html><body>Please enable JavaScript to continue.</body></html>"
+        fake_response.body = (
+            b"<html><body>Please enable JavaScript to continue.</body></html>"
+        )
         mock_fetcher.get.return_value = fake_response
 
         result = self.tool.execute(url="https://example.com")
@@ -391,7 +458,9 @@ class TestWebFetchTool(unittest.TestCase):
         self.assertIn("anti-bot", result.content.lower())
 
     @patch("connectors.web_fetch._ScraplingFetcher")
-    def test_unsupported_region_url_returns_error(self, mock_fetcher: MagicMock) -> None:
+    def test_unsupported_region_url_returns_error(
+        self, mock_fetcher: MagicMock
+    ) -> None:
         fake_response = MagicMock()
         fake_response.url = "https://eu.usatoday.com/unsupported-eu/"
         fake_response.body = b"<html><body>Some generic content</body></html>"
@@ -403,7 +472,9 @@ class TestWebFetchTool(unittest.TestCase):
 
     @patch("connectors.web_fetch._HTTPX")
     @patch("connectors.web_fetch._ScraplingFetcher")
-    def test_fallback_to_httpx(self, mock_fetcher: MagicMock, mock_httpx: MagicMock) -> None:
+    def test_fallback_to_httpx(
+        self, mock_fetcher: MagicMock, mock_httpx: MagicMock
+    ) -> None:
         """When Scrapling fails, HTTP fallback still returns content."""
         mock_fetcher.get.side_effect = RuntimeError("blocked")
         http_response = MagicMock()
@@ -441,6 +512,7 @@ class TestWebFetchTool(unittest.TestCase):
 # MarkTaskDoneTool / UpdateFactTool / ListOpenTasksTool
 # ---------------------------------------------------------------------------
 
+
 class TestMemoryOpTools(unittest.TestCase):
     """Verify memory-op tools read and write the EntityStore SQLite database correctly.
 
@@ -470,7 +542,9 @@ class TestMemoryOpTools(unittest.TestCase):
 
     def test_update_fact_then_list(self) -> None:
         """A stored task appears in ListOpenTasksTool output after UpdateFactTool writes it."""
-        result = self.update.execute(kind="task", key="report", value="Finish Q1 report")
+        result = self.update.execute(
+            kind="task", key="report", value="Finish Q1 report"
+        )
         self.assertFalse(result.is_error)
         self.assertIn("task/report", result.content)
 
@@ -517,7 +591,9 @@ class TestMemoryOpTools(unittest.TestCase):
         assert result is not None
         self.assertIn("Finish Q1 report", result.content)
 
-    def test_auto_mark_done_bare_done_is_conservative_when_multiple_tasks_exist(self) -> None:
+    def test_auto_mark_done_bare_done_is_conservative_when_multiple_tasks_exist(
+        self,
+    ) -> None:
         self.update.execute(kind="task", key="report", value="Finish Q1 report")
         self.update.execute(kind="task", key="deck", value="Ship board deck")
         result = auto_mark_task_done_from_text(self._db, "done")
@@ -535,6 +611,7 @@ class TestMemoryOpTools(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # ReminderAddTool (AppleScript injection safety)
 # ---------------------------------------------------------------------------
+
 
 class TestReminderAddTool(unittest.TestCase):
     """Verify ReminderAddTool builds correct AppleScript and handles all edge cases.
@@ -602,6 +679,7 @@ class TestReminderAddTool(unittest.TestCase):
 # CalendarReadTool (retry-on-timeout behavior)
 # ---------------------------------------------------------------------------
 
+
 class TestCalendarReadTool(unittest.TestCase):
     """Verify CalendarReadTool retries timeout failures once and reports cleanly."""
 
@@ -610,7 +688,9 @@ class TestCalendarReadTool(unittest.TestCase):
 
     @patch("connectors.apple_calendar._run_osascript")
     @patch("connectors.apple_calendar._config")
-    def test_success_first_attempt(self, mock_cfg: MagicMock, mock_run: MagicMock) -> None:
+    def test_success_first_attempt(
+        self, mock_cfg: MagicMock, mock_run: MagicMock
+    ) -> None:
         mock_cfg.get.return_value = MagicMock(
             calendar_read_timeout_seconds=7,
             calendar_read_retry_count=1,
@@ -686,6 +766,7 @@ class TestCalendarReadTool(unittest.TestCase):
 # Reminder datetime parsing (_parse_due_datetime, _due_date_applescript)
 # ---------------------------------------------------------------------------
 
+
 class TestReminderDatetimeParsing(unittest.TestCase):
     """Verify the due date/time parsing helpers handle all supported ISO formats."""
 
@@ -726,6 +807,7 @@ class TestReminderDatetimeParsing(unittest.TestCase):
     def test_applescript_uses_component_setters(self) -> None:
         """_due_date_applescript uses year/month/day/time setters, not date string literals."""
         from datetime import datetime
+
         dt = datetime(2026, 3, 15, 9, 0, 0)
         snippet = _due_date_applescript(dt)
         self.assertIn("set year of d to 2026", snippet)
@@ -737,7 +819,9 @@ class TestReminderDatetimeParsing(unittest.TestCase):
         self.assertNotIn('date "', snippet)
 
     @patch("connectors.apple_calendar._run_osascript")
-    def test_datetime_result_contains_normalized_timestamp(self, mock_run: MagicMock) -> None:
+    def test_datetime_result_contains_normalized_timestamp(
+        self, mock_run: MagicMock
+    ) -> None:
         """Result message contains the normalized ISO timestamp when due_date is valid."""
         mock_run.return_value = ("", False)
         result = self.tool.execute(title="Meeting", due_date="2026-03-15T14:30")
@@ -758,6 +842,7 @@ class TestReminderDatetimeParsing(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # WebFetchTool — JSON detection helpers
 # ---------------------------------------------------------------------------
+
 
 class TestWebFetchJsonDetection(unittest.TestCase):
     """Verify the JSON detection helpers used by WebFetchTool."""
@@ -800,7 +885,9 @@ class TestWebFetchJsonDetection(unittest.TestCase):
 
     @patch("connectors.web_fetch._ScraplingFetcher", None)
     @patch("connectors.web_fetch._HTTPX")
-    def test_json_content_type_response_returns_json(self, mock_httpx: MagicMock) -> None:
+    def test_json_content_type_response_returns_json(
+        self, mock_httpx: MagicMock
+    ) -> None:
         """When server responds with application/json, raw JSON is returned."""
         http_response = MagicMock()
         http_response.headers = {"content-type": "application/json"}
@@ -818,6 +905,7 @@ class TestWebFetchJsonDetection(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # WebFetchTool — TLS fallback toggle
 # ---------------------------------------------------------------------------
+
 
 class TestWebFetchTLSFallback(unittest.TestCase):
     """Verify TLS fallback behaviour controlled by WEB_FETCH_TLS_MODE config."""
@@ -934,7 +1022,9 @@ class TestWebFetchTLSFallback(unittest.TestCase):
             _is_domain_allowlisted("https://docs.example.com/page", ("example.com",))
         )
         self.assertTrue(_is_domain_allowlisted("https://example.com", ("example.com",)))
-        self.assertFalse(_is_domain_allowlisted("https://evil-example.com", ("example.com",)))
+        self.assertFalse(
+            _is_domain_allowlisted("https://evil-example.com", ("example.com",))
+        )
 
 
 if __name__ == "__main__":

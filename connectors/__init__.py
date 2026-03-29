@@ -29,6 +29,12 @@ local_artifacts.py  Read-only local file discovery and extraction:
 apple_calendar.py   Read upcoming Calendar events and add Reminders,
                     both via osascript (macOS only).
 
+telegram_bridge.py  Opt-in Telegram polling bot.  Routes messages from your
+                    phone to BrainService.think_text_stream and streams replies
+                    back.  Requires: pip install python-telegram-bot
+                    Enable by calling TelegramBridge(settings, think_cb).start()
+                    from app_runner.py.  Gated by TELEGRAM_BOT_TOKEN in .env.
+
 Adding a new connector
 ----------------------
 1. Create a file in this package with a Tool subclass.

@@ -21,14 +21,10 @@ import logging
 import time
 from typing import Any
 
+from core.agent.tool_aliases import TOOL_ALIASES as _TOOL_ALIASES
 from core.agent.tool_base import Tool, ToolCall, ToolOutcome, ToolResult
 
 logger = logging.getLogger(__name__)
-
-_TOOL_ALIASES: dict[str, str] = {
-    "search": "web_search",
-    "fetch": "web_fetch",
-}
 
 
 class ToolRegistry:

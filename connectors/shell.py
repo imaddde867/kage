@@ -3,6 +3,7 @@
 `ShellTool` is the default read-only connector registered in the tool registry.
 `ShellMutationTool` is opt-in and requires an explicit confirmation token.
 """
+
 from __future__ import annotations
 
 import shlex
@@ -10,6 +11,7 @@ import subprocess
 from pathlib import Path
 from typing import Iterable
 
+import config
 from core.agent.tool_base import Tool, ToolOutcome, ToolResult
 
 _ALLOWED_READONLY: frozenset[str] = frozenset(
@@ -29,7 +31,10 @@ _ALLOWED_MUTATION: frozenset[str] = frozenset({"mkdir", "cp", "open"})
 _DESTRUCTIVE_FLAGS: frozenset[str] = frozenset(
     {"-rf", "-fr", "-f", "--force", "--delete", "-delete", "--remove"}
 )
-_CONFIRM_TOKEN = "YES_I_UNDERSTAND_LOCAL_MUTATION"
+
+
+def _get_confirm_token() -> str:
+    return config.get().shell_confirm_token
 
 
 def _has_meta_operators(command: str) -> bool:
@@ -126,7 +131,9 @@ class ShellReadOnlyTool(_BaseShellTool):
     )
     parameters = {
         "type": "object",
-        "properties": {"command": {"type": "string", "description": "Read-only shell command"}},
+        "properties": {
+            "command": {"type": "string", "description": "Read-only shell command"}
+        },
         "required": ["command"],
     }
     _allowed = _ALLOWED_READONLY
@@ -155,7 +162,7 @@ class ShellMutationTool(_BaseShellTool):
             "command": {"type": "string", "description": "Mutating shell command"},
             "confirm_token": {
                 "type": "string",
-                "description": f"Must equal '{_CONFIRM_TOKEN}'",
+                "description": "Token required to confirm mutation (set via SHELL_CONFIRM_TOKEN env var)",
             },
             "allowed_root": {
                 "type": "string",
@@ -194,7 +201,7 @@ class ShellMutationTool(_BaseShellTool):
         **kwargs,
     ) -> ToolResult:
         del kwargs
-        if confirm_token != _CONFIRM_TOKEN:
+        if confirm_token != _get_confirm_token():
             return _result(
                 tool_name=self.name,
                 content="Mutation command blocked: missing/invalid confirmation token.",
@@ -203,10 +210,14 @@ class ShellMutationTool(_BaseShellTool):
             )
         parts, err = _normalized_parts(command)
         if parts is None:
-            return _result(tool_name=self.name, content=str(err), is_error=True, side_effects=True)
+            return _result(
+                tool_name=self.name, content=str(err), is_error=True, side_effects=True
+            )
         err = self._validate(parts, command=command)
         if err:
-            return _result(tool_name=self.name, content=err, is_error=True, side_effects=True)
+            return _result(
+                tool_name=self.name, content=err, is_error=True, side_effects=True
+            )
         if allowed_root and not self._within_root(parts[1:], allowed_root):
             return _result(
                 tool_name=self.name,

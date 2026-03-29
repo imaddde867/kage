@@ -6,8 +6,10 @@ This makes downstream URL selection and de-duplication more reliable.
 from __future__ import annotations
 
 import json
+import time
 import warnings
 
+import config as _config
 from core.agent.tool_base import Tool, ToolOutcome, ToolResult
 
 _DDGS = None  # type: ignore[assignment]
@@ -58,6 +60,7 @@ class WebSearchTool(Tool):
     not know, or anything that benefits from up-to-date web results.
     """
     name = "web_search"
+    _last_call_time: float = 0.0
     description = "Search the web for recent or factual information with URLs"
     parameters = {
         "type": "object",
@@ -136,6 +139,12 @@ class WebSearchTool(Tool):
     def execute(self, *, query: str, max_results: int = _DEFAULT_RESULTS, **kwargs) -> ToolResult:
         """Run a DuckDuckGo text search and return compact structured JSON."""
         del kwargs
+        min_interval = getattr(_config.get(), "web_search_min_interval_seconds", 1.0)
+        elapsed = time.monotonic() - WebSearchTool._last_call_time
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+        WebSearchTool._last_call_time = time.monotonic()
+
         if _DDGS is None:
             return self._error_result(
                 "DuckDuckGo search is not installed. Run: pip install ddgs",

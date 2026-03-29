@@ -16,6 +16,34 @@ class TraceStore:
     def __post_init__(self) -> None:
         ensure_schema(self.db_path)
 
+    def count(self) -> int:
+        """Return total number of stored trace records."""
+        with connect_db(self.db_path) as conn:
+            row = conn.execute("SELECT COUNT(*) FROM traces").fetchone()
+        return int(row[0]) if row else 0
+
+    def prune(self, keep_last: int) -> int:
+        """Delete all but the most recent *keep_last* trace records.
+
+        Returns the number of rows deleted.
+        """
+        keep = max(0, keep_last)
+        with connect_db(self.db_path) as conn:
+            before = conn.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
+            conn.execute(
+                """
+                DELETE FROM traces
+                WHERE rowid NOT IN (
+                    SELECT rowid FROM traces
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                )
+                """,
+                (keep,),
+            )
+            after = conn.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
+        return int(before) - int(after)
+
     def record(
         self,
         *,

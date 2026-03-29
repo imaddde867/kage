@@ -99,6 +99,34 @@ class ConversationStore:
             turns.append((user, reply))
         return turns
 
+    def count(self) -> int:
+        """Return total number of stored conversation exchanges."""
+        with connect_db(self.db_path) as conn:
+            row = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()
+        return int(row[0]) if row else 0
+
+    def prune(self, keep_last: int) -> int:
+        """Delete all but the most recent *keep_last* exchanges.
+
+        Returns the number of rows deleted.
+        """
+        keep = max(0, keep_last)
+        with connect_db(self.db_path) as conn:
+            before = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
+            conn.execute(
+                """
+                DELETE FROM conversations
+                WHERE rowid NOT IN (
+                    SELECT rowid FROM conversations
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                )
+                """,
+                (keep,),
+            )
+            after = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
+        return int(before) - int(after)
+
     def recall(self, query: str, n_results: int = 5, *, char_budget: int = _RECALL_CHAR_BUDGET) -> str:
         if n_results <= 0 or char_budget <= 0:
             return ""

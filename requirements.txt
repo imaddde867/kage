@@ -9,8 +9,10 @@ mlx-audio[tts]
 
 # Speech to text — Apple native (fast, hardware-accelerated, no model load)
 SpeechRecognition
-# Speech to text fallback — local Whisper
-faster-whisper
+# Speech to text fallback — local Whisper (MLX)
+mlx-whisper
+# Speech to text — Parakeet V3 (NVIDIA NeMo, CPU/GPU)
+nano-parakeet
 
 # Audio recording
 sounddevice

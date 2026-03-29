@@ -56,7 +56,7 @@ from urllib.parse import urlparse, urlunparse
 
 import config
 from core.agent.parser import parse_step
-from core.agent.tool_base import ToolCall
+from core.agent.tool_base import ToolCall, ToolResult
 from core.agent.tool_registry import ToolRegistry
 from core.brain_guardrails import guard_answer_truthfulness, guard_temporal_uncertainty
 from core.brain_prompting import apply_chat_template
@@ -349,7 +349,7 @@ class AgentLoop:
         by the timing display in main.py.
         """
         chunks: list[str] = []
-        temperature = float(getattr(self._settings, "agent_temperature", 0.0))
+        temperature = float(self._settings.agent_temperature)
         for chunk in self._runtime.stream_raw(
             prompt,
             max_tokens=self._settings.mlx_max_tokens,
@@ -360,8 +360,7 @@ class AgentLoop:
         return "".join(chunks)
 
     def _compress_observation(self, tool_name: str, content: str) -> str:
-        max_chars = int(getattr(self._settings, "agent_observation_max_chars", 1800))
-        max_chars = max(500, max_chars)
+        max_chars = max(500, self._settings.agent_observation_max_chars)
         text = content.strip()
         if not text:
             return ""
@@ -419,8 +418,7 @@ class AgentLoop:
             content=self._compress_observation(tool_name, content),
         )
         history.append((assistant_raw, observation))
-        budget = int(getattr(self._settings, "agent_history_char_budget", 8000))
-        budget = max(1000, budget)
+        budget = max(1000, self._settings.agent_history_char_budget)
         while history and self._history_chars(history) > budget:
             history.pop(0)
 
@@ -566,8 +564,8 @@ class AgentLoop:
         return remaining
 
     def _execute_tool_with_retries(self, tool_call: Any) -> tuple[Any, int]:
-        max_retries = max(0, int(getattr(self._settings, "agent_tool_max_retries", 1)))
-        backoff_base = max(0.0, float(getattr(self._settings, "agent_tool_retry_backoff_seconds", 0.25)))
+        max_retries = max(0, self._settings.agent_tool_max_retries)
+        backoff_base = max(0.0, self._settings.agent_tool_retry_backoff_seconds)
         max_attempts = 1 + max_retries
 
         result = None
@@ -584,7 +582,8 @@ class AgentLoop:
             if delay > 0:
                 time.sleep(delay)
 
-        assert result is not None
+        if result is None:
+            result = ToolResult(tool_name=tool_call.name, content="tool execution failed: no result returned", is_error=True)
         return result, max_attempts
 
     def _is_retryable_tool_error(self, result: Any) -> bool:
@@ -619,8 +618,8 @@ class AgentLoop:
         retry_info = f" (after {attempts} attempts)" if attempts > 1 else ""
         content = f"{result.content}{retry_info}"
 
-        cooldown_after = max(1, int(getattr(self._settings, "agent_tool_cooldown_failures", 2)))
-        cooldown_seconds = max(0.0, float(getattr(self._settings, "agent_tool_cooldown_seconds", 15.0)))
+        cooldown_after = max(1, self._settings.agent_tool_cooldown_failures)
+        cooldown_seconds = max(0.0, self._settings.agent_tool_cooldown_seconds)
         if failures >= cooldown_after and cooldown_seconds > 0:
             state.tool_cooldowns[tool_name] = time.monotonic() + cooldown_seconds
             return (
@@ -767,7 +766,7 @@ class AgentLoop:
             result=result,
             attempts=attempts,
         )
-        if result.is_error and bool(getattr(self._settings, "agent_reflection_enabled", True)):
+        if result.is_error and self._settings.agent_reflection_enabled:
             reflection = self._reflection_for_tool_failure(
                 tool_name=result.tool_name,
                 content=content_for_history,
@@ -889,11 +888,8 @@ class AgentLoop:
         Yields:
             String chunks of the final answer, or a cap-exceeded message.
         """
-        configured_steps = max(1, int(getattr(self._settings, "agent_max_steps", 8)))
-        horizon_cap = max(
-            1,
-            int(getattr(self._settings, "agent_autonomy_max_horizon_steps", configured_steps)),
-        )
+        configured_steps = max(1, self._settings.agent_max_steps)
+        horizon_cap = max(1, self._settings.agent_autonomy_max_horizon_steps)
         if max_steps is None:
             max_steps = configured_steps
         max_steps = max(1, min(int(max_steps), horizon_cap))
