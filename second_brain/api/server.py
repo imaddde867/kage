@@ -96,7 +96,10 @@ def list_entities():
         result = store.conn.execute(
             "MATCH (e:Entity) RETURN e.name ORDER BY e.name"
         )
-        return {"entities": [row[0] for row in result.get_as_df().itertuples(index=False)]}
+        entities = []
+        while result.has_next():
+            entities.append(result.get_next()[0])
+        return {"entities": entities}
     except Exception:
         return {"entities": []}
 
@@ -110,12 +113,11 @@ def list_tags():
             RETURN t.name, count(n) AS cnt
             ORDER BY cnt DESC
         """)
-        return {
-            "tags": [
-                {"name": row[0], "count": row[1]}
-                for row in result.get_as_df().itertuples(index=False)
-            ]
-        }
+        tags = []
+        while result.has_next():
+            row = result.get_next()
+            tags.append({"name": row[0], "count": row[1]})
+        return {"tags": tags}
     except Exception:
         return {"tags": []}
 
