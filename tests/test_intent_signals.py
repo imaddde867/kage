@@ -33,6 +33,10 @@ class TestIntentSignals(unittest.TestCase):
         text = "Use shell to show current directory and date."
         self.assertTrue(DEFAULT_SIGNALS.has(text, "needs_tools"))
 
+    def test_local_file_request_needs_tools(self) -> None:
+        text = "There is a PDF called Lasku under Downloads, check the specs."
+        self.assertTrue(DEFAULT_SIGNALS.has(text, "needs_tools"))
+
     def test_reminder_request_needs_tools(self) -> None:
         text = "Add a reminder: Pay rent due 2026-03-09."
         self.assertTrue(DEFAULT_SIGNALS.has(text, "needs_tools"))

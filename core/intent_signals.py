@@ -80,6 +80,17 @@ _DEFAULT_RULES: tuple[SignalRule, ...] = (
     SignalRule("needs_tools", r"\b(remember this|store this|save this|mark task|mark .* as done)\b", 1.0),
     SignalRule("needs_tools", r"\b(use|run|execute)\s+(the\s+)?(shell|terminal)\b", 1.0),
     SignalRule("needs_tools", r"\b(os version|cpu architecture|current directory|uname|pwd|sw_vers)\b", 1.0),
+    SignalRule(
+        "needs_tools",
+        r"\b(check|inspect|open|read|analy[sz]e|summari[sz]e|extract)\b.*\b(file|files|pdf|docx|xlsx|csv|spreadsheet|document)\b",
+        1.0,
+    ),
+    SignalRule(
+        "needs_tools",
+        r"\b(file|files|pdf|docx|xlsx|csv|spreadsheet|document)\b.*\b(downloads?|desktop|documents?|folder|path)\b",
+        1.0,
+    ),
+    SignalRule("needs_tools", r"\bcalled\s+[\"']?[\w\-. ]+[\"']?\s+under\s+(downloads?|desktop|documents?)\b", 1.0),
     SignalRule("needs_tools", r"\b(latest|recent updates?|current|today'?s?|right now|breaking news|live)\b", 1.0),
     SignalRule(
         "needs_tools",

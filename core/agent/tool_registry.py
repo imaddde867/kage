@@ -96,7 +96,37 @@ class ToolRegistry:
             if isinstance(repaired.get("q"), str) and repaired["q"].strip():
                 repaired["query"] = repaired["q"]
 
-        for key in ("max_results", "max_chars", "days"):
+        if tool_name == "local_find_files":
+            if "query" not in repaired:
+                for candidate in ("name", "filename", "pattern", "file_name"):
+                    value = repaired.get(candidate)
+                    if isinstance(value, str) and value.strip():
+                        repaired["query"] = value
+                        break
+            if "directory" not in repaired:
+                for candidate in ("dir", "folder", "root", "path"):
+                    value = repaired.get(candidate)
+                    if isinstance(value, str) and value.strip():
+                        repaired["directory"] = value
+                        break
+            if "extensions_csv" not in repaired:
+                value = repaired.get("extensions")
+                if isinstance(value, str) and value.strip():
+                    repaired["extensions_csv"] = value
+                elif isinstance(value, list):
+                    parts = [str(item).strip() for item in value if str(item).strip()]
+                    if parts:
+                        repaired["extensions_csv"] = ",".join(parts)
+
+        if tool_name in {"local_read_text", "local_extract_pdf", "local_extract_docx", "local_extract_sheet"}:
+            if "path" not in repaired:
+                for candidate in ("file", "file_path", "filepath", "target", "location", "filename"):
+                    value = repaired.get(candidate)
+                    if isinstance(value, str) and value.strip():
+                        repaired["path"] = value
+                        break
+
+        for key in ("max_results", "max_chars", "days", "max_pages", "max_rows", "max_sheets"):
             value = repaired.get(key)
             if isinstance(value, str):
                 try:
@@ -111,6 +141,10 @@ class ToolRegistry:
             return 'Example: <tool>web_fetch</tool><input>{"url":"https://example.com"}</input>'
         if tool_name == "web_search":
             return 'Example: <tool>web_search</tool><input>{"query":"latest AI news"}</input>'
+        if tool_name == "local_find_files":
+            return 'Example: <tool>local_find_files</tool><input>{"query":"Lasku","directory":"~/Downloads"}</input>'
+        if tool_name == "local_extract_pdf":
+            return 'Example: <tool>local_extract_pdf</tool><input>{"path":"~/Downloads/Lasku.pdf"}</input>'
         return ""
 
     def _validate_args(self, tool: Tool, args: dict[str, Any]) -> str | None:

@@ -88,6 +88,22 @@ class _WebSearchDouble(Tool):
         return ToolResult(tool_name=self.name, content=f"query={query}|max_results={max_results}")
 
 
+class _LocalExtractPdfDouble(Tool):
+    name = "local_extract_pdf"
+    description = "Extract PDF"
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "max_chars": {"type": "integer"},
+        },
+        "required": ["path"],
+    }
+
+    def execute(self, *, path: str, max_chars: int = 0, **kwargs: Any) -> ToolResult:
+        return ToolResult(tool_name=self.name, content=f"path={path}|max_chars={max_chars}")
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -103,6 +119,7 @@ class TestToolRegistry(unittest.TestCase):
         self.registry.register(_BrokenTool())
         self.registry.register(_WebFetchDouble())
         self.registry.register(_WebSearchDouble())
+        self.registry.register(_LocalExtractPdfDouble())
 
     def test_names_contains_registered_tools(self) -> None:
         """names() returns the tool name of every registered tool."""
@@ -161,6 +178,14 @@ class TestToolRegistry(unittest.TestCase):
         )
         self.assertTrue(result.is_error)
         self.assertIn("Malformed tool output", result.content)
+
+    def test_local_path_aliases_are_repaired(self) -> None:
+        result = self.registry.execute(
+            ToolCall(name="local_extract_pdf", args={"file_path": "~/Downloads/Lasku.pdf", "max_chars": "700"})
+        )
+        self.assertFalse(result.is_error)
+        self.assertIn("path=~/Downloads/Lasku.pdf", result.content)
+        self.assertIn("max_chars=700", result.content)
 
     def test_schema_block_contains_tool_info(self) -> None:
         """schema_block() includes each tool's name and description for the system prompt."""

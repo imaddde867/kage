@@ -115,6 +115,9 @@ def collect_doctor_checks(*, settings: config.Settings) -> list[DoctorCheck]:
         "scrapling": _module_available("scrapling"),
         "httpx": _module_available("httpx"),
         "trafilatura": _module_available("trafilatura"),
+        "pypdf": _module_available("pypdf"),
+        "python_docx": _module_available("docx"),
+        "openpyxl": _module_available("openpyxl"),
     }
     for name, ok in dep_checks.items():
         status = "ok" if ok else "warning"
@@ -172,6 +175,49 @@ def collect_doctor_checks(*, settings: config.Settings) -> list[DoctorCheck]:
             )
         else:
             checks.append(DoctorCheck("agent_mode", "ok", "Agent mode has its core web dependency available"))
+
+    raw_safe_roots = tuple(getattr(settings, "local_artifact_safe_roots", ("./", "~")) or ("./", "~"))
+    safe_roots = [Path(root).expanduser() for root in raw_safe_roots]
+    if not safe_roots:
+        checks.append(DoctorCheck("local_artifact_roots", "error", "No safe roots configured"))
+    else:
+        readable = [str(root) for root in safe_roots if root.exists() and os.access(root, os.R_OK)]
+        if readable:
+            checks.append(
+                DoctorCheck(
+                    "local_artifact_roots",
+                    "ok",
+                    f"Readable roots: {', '.join(readable[:3])}",
+                )
+            )
+        else:
+            checks.append(
+                DoctorCheck(
+                    "local_artifact_roots",
+                    "warning",
+                    "Configured safe roots do not currently exist or are unreadable",
+                )
+            )
+
+    extractor_missing = [
+        name for name in ("pypdf", "python_docx", "openpyxl") if not dep_checks[name]
+    ]
+    if extractor_missing:
+        checks.append(
+            DoctorCheck(
+                "local_artifact_extractors",
+                "warning",
+                f"Missing optional extractor deps: {', '.join(extractor_missing)}",
+            )
+        )
+    else:
+        checks.append(
+            DoctorCheck(
+                "local_artifact_extractors",
+                "ok",
+                "PDF, DOCX, and sheet extractors are available",
+            )
+        )
 
     on_macos = sys.platform == "darwin"
     osascript_available = shutil.which("osascript") is not None

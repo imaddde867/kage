@@ -44,6 +44,16 @@ _TOOL_ALIASES: dict[str, str] = {
     "shell": "shell",
     "notify": "notify",
     "speak": "speak",
+    "local_find_files": "local_find_files",
+    "local_read_text": "local_read_text",
+    "local_extract_pdf": "local_extract_pdf",
+    "local_extract_docx": "local_extract_docx",
+    "local_extract_sheet": "local_extract_sheet",
+    "find_file": "local_find_files",
+    "read_file": "local_read_text",
+    "extract_pdf": "local_extract_pdf",
+    "extract_docx": "local_extract_docx",
+    "extract_sheet": "local_extract_sheet",
 }
 
 _ALT_BODY_RE = re.compile(
@@ -93,6 +103,11 @@ def _args_from_body(body: str, tool_name: str) -> dict:
         "speak": "message",
         "calendar_read": "days",
         "reminder_add": "title",
+        "local_find_files": "query",
+        "local_read_text": "path",
+        "local_extract_pdf": "path",
+        "local_extract_docx": "path",
+        "local_extract_sheet": "path",
     }
     key = primary_arg.get(tool_name)
     if key and body:

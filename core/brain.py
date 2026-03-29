@@ -66,7 +66,7 @@ _TOOL_HEALTH_QUERY_RE = re.compile(
 )
 _WEB_REQUEST_RE = re.compile(r"\b(web|internet|online|search|fetch|source|url|latest|current|right now)\b", re.IGNORECASE)
 _LOCAL_REQUEST_RE = re.compile(
-    r"\b(shell|terminal|os|operating system|cpu|architecture|uname|sw_vers|sysctl|pwd|directory)\b",
+    r"\b(shell|terminal|os|operating system|cpu|architecture|uname|sw_vers|sysctl|pwd|directory|file|files|pdf|docx|xlsx|csv|download|downloads|desktop|document)\b",
     re.IGNORECASE,
 )
 _CALENDAR_REQUEST_RE = re.compile(r"\b(calendar|appointment|schedule|meeting|reminder)\b", re.IGNORECASE)
@@ -84,6 +84,11 @@ _TOOL_CATEGORY_BY_NAME: dict[str, str] = {
     "cancel_reminder": "memory",
     "shell": "local",
     "shell_mutation": "local",
+    "local_find_files": "local",
+    "local_read_text": "local",
+    "local_extract_pdf": "local",
+    "local_extract_docx": "local",
+    "local_extract_sheet": "local",
     "web_search": "web",
     "web_fetch": "web",
     "browser_fetch": "web",
@@ -181,6 +186,7 @@ class BrainService:
         silently skipped with a debug log if the import fails):
             web_fetch         — prefers scrapling[fetchers], falls back to httpx
             shell             — no extra deps, always available
+            local_artifacts   — read-only local file discovery + extraction (txt/pdf/docx/csv/xlsx)
             calendar_read     — macOS only (osascript)
             reminder_add      — macOS only (osascript)
 
@@ -240,6 +246,23 @@ class BrainService:
             registry.register(ShellTool())
         except ImportError:
             logger.debug("shell connector unavailable")
+
+        try:
+            from connectors.local_artifacts import (
+                LocalExtractDocxTool,
+                LocalExtractPdfTool,
+                LocalExtractSheetTool,
+                LocalFindFilesTool,
+                LocalReadTextTool,
+            )
+
+            registry.register(LocalFindFilesTool())
+            registry.register(LocalReadTextTool())
+            registry.register(LocalExtractPdfTool())
+            registry.register(LocalExtractDocxTool())
+            registry.register(LocalExtractSheetTool())
+        except ImportError:
+            logger.debug("local_artifacts connector unavailable")
 
         try:
             from connectors.apple_calendar import CalendarReadTool, ReminderAddTool
@@ -517,6 +540,7 @@ class BrainService:
             "  - Web search or fetching URLs\n"
             "  - Calendar or reminder operations\n"
             "  - Shell commands or system information\n"
+            "  - Local file discovery or document extraction (txt/pdf/docx/csv/xlsx)\n"
             "  - Memory write operations (storing facts or tasks)\n"
             "  - Product/spec comparisons that need current web data or local machine inspection\n"
             "  - Time-sensitive facts, current events, prices, or live data\n\n"
@@ -529,7 +553,8 @@ class BrainService:
             "  'Who wrote Hamlet?' → no\n"
             "  'Run ls in my home folder' → yes\n"
             "  'What is the weather right now?' → yes\n"
-            "  'Compare the new MacBook Neo to my local machine' → yes"
+            "  'Compare the new MacBook Neo to my local machine' → yes\n"
+            "  'There is a PDF in Downloads called Lasku, check specs' → yes"
         )
         messages = [
             {"role": "system", "content": system},
