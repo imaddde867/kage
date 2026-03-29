@@ -1,21 +1,34 @@
 """Cortex API — FastAPI server exposing search, ask, and stats endpoints."""
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from graph.store import BrainStore
 from query.engine import QueryEngine
 
-app = FastAPI(title="Cortex", version="0.1.0")
+# Module-level placeholders — populated in lifespan so importing this module
+# does NOT open the Kuzu database (avoids lock conflicts in tests).
+store: BrainStore = None  # type: ignore[assignment]
+engine: QueryEngine = None  # type: ignore[assignment]
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global store, engine
+    store = BrainStore()
+    engine = QueryEngine(store)
+    yield
+    # nothing to clean up — Kuzu/ChromaDB close on GC
+
+
+app = FastAPI(title="Cortex", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-store = BrainStore()
-engine = QueryEngine(store)
 
 
 class AskRequest(BaseModel):
