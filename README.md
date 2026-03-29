@@ -37,31 +37,31 @@ Together they form **NeuroCache** — Kage answers from *your own knowledge*, no
 
 ```
 ┌──────────────────────────── Kage ──────────────────────────────┐
-│                                                                  │
+│                                                                │
 │  Voice  : wake word ──► STT ──► brain ──► TTS                  │
 │  Text   : terminal UI (Textual) ──► brain                      │
-│                                                                  │
-│  brain.py                                                       │
+│                                                                │
+│  brain.py                                                      │
 │  ├── orchestrator      route ──► direct answer │ agent loop    │
 │  ├── context_planner   inject memory + vault notes             │
-│  ├── inference/        local Qwen3.5-9B (MLX) or cloud LLM    │
+│  ├── inference/        local Qwen3.5-9B (MLX) or cloud LLM     │
 │  └── connectors/       web, calendar, shell, neurocache …      │
-│                                   │                             │
-└───────────────────────────────────┼─────────────────────────── ┘
+│                                   │                            │
+└───────────────────────────────────┼────────────────────────────┘
                                     │ HTTP :8765
-┌───────────────────── second_brain ▼ ──────────────────────────┐
-│                                                                  │
+┌───────────────────── second_brain ▼ ───────────────────────────┐
+│                                                                │
 │  FastAPI server (:8765) ◄──► QueryEngine                       │
 │                               ├── vector  (ChromaDB)           │
 │                               ├── keyword (BM25)               │
 │                               └── graph   (Kuzu traversal)     │
-│  Ingestion                                                      │
+│  Ingestion                                                     │
 │  ├── Obsidian watcher    live re-index on save                 │
 │  ├── Markdown parser     frontmatter · tags · [[links]]        │
 │  └── Code ingestor       tree-sitter: Python / JS / TS         │
-│                                                                  │
+│                                                                │
 │  Web UI  (React/Vite, :5173)  ◄── optional                     │
-└─────────────────────────────────────────────────────────────── ┘
+└────────────────────────────────────────────────────────────────┘
 ```
 
 ---
